@@ -196,7 +196,7 @@ func (c *Client) syncReactions(ctx context.Context, state *RoomState, m chatgpt.
 	if len(parts) == 0 || m.Deleted != nil {
 		return nil
 	}
-	partID := networkid.PartID("")
+	partID := textPartID(m, parts)
 	if attachments := mappedAttachments(m, parts); len(attachments) > 0 {
 		partID = attachments[0].PartID
 	}

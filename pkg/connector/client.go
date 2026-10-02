@@ -344,13 +344,18 @@ func revision(m chatgpt.Message) string {
 	return messageRevision(m, false)
 }
 func messageRevision(m chatgpt.Message, includeUpdateTime bool) string {
-	attachments := make([]struct {
+	type attachmentRevision struct {
 		Type         string `json:"type"`
 		FileID       string `json:"file_id"`
 		AttachmentID string `json:"attachment_id"`
-	}, len(m.Content.Attachments))
-	for i, raw := range m.Content.Attachments {
-		_ = json.Unmarshal(raw, &attachments[i])
+	}
+	attachments := make([]attachmentRevision, 0, len(m.Content.Attachments))
+	for _, raw := range m.Content.Attachments {
+		var attachment attachmentRevision
+		_ = json.Unmarshal(raw, &attachment)
+		if attachment.Type != "link" || includeUpdateTime {
+			attachments = append(attachments, attachment)
+		}
 	}
 	encoded, _ := json.Marshal(attachments)
 	updated := ""
@@ -558,7 +563,7 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		current := incomingRevisions(m, existing)
 		for _, part := range existing {
 			md, ok := part.Metadata.(*MessageMetadata)
-			if ok && md.Revision == legacy[part.PartID] && md.Revision != current[part.PartID] {
+			if ok && len(messageAttachments(m)) == len(mappedAttachments(m, existing)) && md.Revision == legacy[part.PartID] && md.Revision != current[part.PartID] {
 				previous := md.Revision
 				md.Revision = current[part.PartID]
 				if err := c.connector.bridge.DB.Message.Update(ctx, part); err != nil {

@@ -61,23 +61,47 @@ func outgoingMediaAnchor(existing []*database.Message) bool {
 }
 
 func mappedAttachments(m chatgpt.Message, existing []*database.Message) []incomingAttachment {
-	attachments := messageAttachments(m)
+	var attachments []incomingAttachment
+	for _, attachment := range messageAttachments(m) {
+		if attachment.Type != "link" {
+			attachments = append(attachments, attachment)
+		}
+	}
 	if len(attachments) > 0 && outgoingMediaAnchor(existing) {
 		attachments[0].PartID = ""
 	}
 	return attachments
 }
 
+func textPartID(m chatgpt.Message, existing []*database.Message) networkid.PartID {
+	for _, part := range existing {
+		if md, ok := part.Metadata.(*MessageMetadata); part.PartID == "" || ok && md.TextAnchor {
+			return part.PartID
+		}
+	}
+	for _, attachment := range messageAttachments(m) {
+		if attachment.Type == "link" {
+			for _, part := range existing {
+				if part.PartID == attachment.PartID {
+					return part.PartID
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func expectedIncomingParts(m chatgpt.Message, existing []*database.Message) map[networkid.PartID]bool {
 	parts := make(map[networkid.PartID]bool)
+	attachments := mappedAttachments(m, existing)
 	if m.Deleted != nil {
 		parts["deleted"] = true
-	} else if len(m.Content.Attachments) == 0 {
+	} else if len(attachments) == 0 {
 		if m.Content.Text != "" {
-			parts[""] = true
+			parts[textPartID(m, existing)] = true
 		}
 	} else {
-		for _, attachment := range mappedAttachments(m, existing) {
+		for _, attachment := range attachments {
 			parts[attachment.PartID] = true
 		}
 	}
@@ -108,14 +132,15 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 		}
 	}
 	result := &bridgev2.ConvertedMessage{}
-	if m.Deleted == nil && m.Content.Text == "" && len(m.Content.Attachments) == 0 {
+	attachments := mappedAttachments(m, existing)
+	if m.Deleted == nil && m.Content.Text == "" && len(attachments) == 0 {
 		return result, nil
 	}
 	add := func(id networkid.PartID, content *event.MessageEventContent, thread *chatgpt.ThreadStatus) {
-		result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Revision: revisions[id], Thread: thread, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}})
+		result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Revision: revisions[id], Thread: thread, TextAnchor: len(attachments) == 0 && m.Deleted == nil, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}})
 	}
-	if m.Deleted != nil || len(m.Content.Attachments) == 0 {
-		partID := networkid.PartID("")
+	if m.Deleted != nil || len(attachments) == 0 {
+		partID := textPartID(m, existing)
 		if m.Deleted != nil {
 			partID = "deleted"
 		}
@@ -134,7 +159,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 	if api == nil || ctx.Err() != nil {
 		return nil, errors.New("ChatGPT connection unavailable for attachment download")
 	}
-	for i, attachment := range mappedAttachments(m, existing) {
+	for i, attachment := range attachments {
 		if current[attachment.PartID] {
 			continue
 		}

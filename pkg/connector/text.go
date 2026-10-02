@@ -25,7 +25,7 @@ func renderText(text string) *event.MessageEventContent {
 }
 
 func textRevision(m chatgpt.Message, base string) string {
-	if m.Deleted != nil || len(m.Content.Attachments) != 0 || m.Content.Text == "" {
+	if m.Deleted != nil || len(mappedAttachments(m, nil)) != 0 || m.Content.Text == "" {
 		return base
 	}
 	content := renderText(m.Content.Text)

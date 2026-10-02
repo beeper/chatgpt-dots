@@ -49,6 +49,7 @@ type RoomState struct {
 }
 type MessageMetadata struct {
 	OutgoingMedia bool                  `json:"outgoing_media,omitempty"`
+	TextAnchor    bool                  `json:"text_anchor,omitempty"`
 	Revision      string                `json:"revision"`
 	Thread        *chatgpt.ThreadStatus `json:"thread,omitempty"`
 }
