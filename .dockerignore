@@ -1,0 +1,15 @@
+**
+!go.mod
+!go.sum
+!build.sh
+!docker-run.sh
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!THIRD_PARTY_LICENSES.txt
+!cmd/
+!cmd/**/
+!cmd/**/*.go
+!pkg/
+!pkg/**/
+!pkg/**/*.go
+!pkg/**/*.yaml

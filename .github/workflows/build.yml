@@ -1,0 +1,70 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  binary:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: darwin-arm64
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27'
+          cache: true
+      - name: Build
+        env:
+          CI_COMMIT_SHA: ${{ github.sha }}
+        run: sh ./build.sh
+      - name: Check executable
+        run: ./chatgpt-dots --version
+      - name: Vet
+        run: go vet -mod=readonly -tags goolm ./...
+      - name: Package executable
+        run: tar -czf chatgpt-dots-${{ matrix.target }}.tar.gz chatgpt-dots LICENSE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chatgpt-dots-${{ matrix.target }}
+          path: chatgpt-dots-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  container:
+    name: Build container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build
+        run: docker build --build-arg CI_COMMIT_SHA="$GITHUB_SHA" --tag chatgpt-dots:ci .
+      - name: Check executable
+        run: docker run --rm chatgpt-dots:ci --version
+      - name: Export image
+        run: docker save chatgpt-dots:ci | gzip > chatgpt-dots-container.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chatgpt-dots-container-linux-amd64
+          path: chatgpt-dots-container.tar.gz
+          if-no-files-found: error
