@@ -50,6 +50,25 @@ func (c *Client) RoomSignals(ctx context.Context, p Profile) (*Room, error) {
 	return &room, nil
 }
 
+func keepAlive(ctx context.Context, conn *websocket.Conn) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := conn.Ping(pingCtx)
+		cancel()
+		if err != nil {
+			conn.CloseNow()
+			return
+		}
+	}
+}
+
 func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) error {
 	var endpoint struct {
 		URL string `json:"websocket_url"`
@@ -69,6 +88,9 @@ func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) e
 	}
 	defer conn.CloseNow()
 	conn.SetReadLimit(4 << 20)
+	pingCtx, stopPing := context.WithCancel(ctx)
+	defer stopPing()
+	go keepAlive(pingCtx, conn)
 	commands := `[{"id":1,"command":{"type":"connect","presence":{"type":"presence","state":"background"}}},{"id":2,"command":{"type":"subscribe","topic_id":"calpico-chatgpt-messaging"}}]`
 	writeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	err = conn.Write(writeCtx, websocket.MessageText, []byte(commands))

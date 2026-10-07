@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,14 @@ import (
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
+)
+
+const (
+	pollInterval          = 3 * time.Second
+	livePollInterval      = 30 * time.Second
+	fullScanInterval      = 30 * time.Minute
+	avatarRefreshInterval = 30 * time.Minute
 )
 
 type Client struct {
@@ -39,8 +48,11 @@ type Client struct {
 	lastFullScan   time.Time
 	threadMessages map[string]*threadMessage
 	signalWake     chan struct{}
+	signalsLive    atomic.Bool
 	rescan         atomic.Bool
 	receipts       map[string]*receiptState
+	delivered      map[string][32]byte
+	deliveredOrder []string
 }
 
 func (c *Client) Connect(ctx context.Context) {
@@ -110,6 +122,8 @@ func (c *Client) run(ctx context.Context) {
 	c.lastFullScan = time.Time{}
 	c.signalWake = make(chan struct{}, 1)
 	c.receipts = make(map[string]*receiptState)
+	c.delivered = make(map[string][32]byte)
+	c.deliveredOrder = nil
 	for _, watch := range c.threadMessages {
 		watch.NextRefresh = time.Time{}
 	}
@@ -138,7 +152,7 @@ func (c *Client) run(ctx context.Context) {
 	}
 	delay := time.Second * 3
 	for ctx.Err() == nil {
-		err = c.verify(ctx, api)
+		err = c.verify(ctx, api, true)
 		if err == nil {
 			break
 		}
@@ -161,16 +175,29 @@ func (c *Client) run(ctx context.Context) {
 		c.streamSignals(streamCtx, api)
 	}()
 	defer func() { stopStream(); <-streamDone }()
-	delay = 3 * time.Second
+	delay = pollInterval
 	nextProfileRefresh := time.Now().Add(time.Minute)
+	nextAvatarRefresh := time.Now().Add(avatarRefreshInterval)
+	var nextPoll time.Time
 	for ctx.Err() == nil {
-		err = c.poll(ctx, api)
+		err = nil
+		if !time.Now().Before(nextPoll) {
+			err = c.poll(ctx, api)
+			nextPoll = time.Now().Add(pollInterval)
+			if c.signalsLive.Load() {
+				nextPoll = time.Now().Add(livePollInterval)
+			}
+		}
 		threadErr := c.refreshThreads(ctx, api)
 		if err == nil {
 			err = threadErr
 		}
 		if !time.Now().Before(nextProfileRefresh) {
-			if profileErr := c.verify(ctx, api); profileErr != nil {
+			avatars := !time.Now().Before(nextAvatarRefresh)
+			if avatars {
+				nextAvatarRefresh = time.Now().Add(avatarRefreshInterval)
+			}
+			if profileErr := c.verify(ctx, api, avatars); profileErr != nil {
 				c.login.Log.Warn().Err(profileErr).Msg("Could not refresh ChatGPT profiles")
 			}
 			nextProfileRefresh = time.Now().Add(time.Minute)
@@ -181,10 +208,11 @@ func (c *Client) run(ctx context.Context) {
 			}
 			c.state(err)
 			delay = min(delay*2, time.Minute)
+			nextPoll = time.Time{}
 		} else {
 			c.connected.Store(true)
 			c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
-			delay = 3 * time.Second
+			delay = pollInterval
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -193,6 +221,7 @@ func (c *Client) run(ctx context.Context) {
 			return
 		case <-c.signalWake:
 			timer.Stop()
+			nextPoll = time.Time{}
 		case <-timer.C:
 		}
 	}
@@ -207,7 +236,7 @@ func wait(ctx context.Context, d time.Duration) bool {
 		return true
 	}
 }
-func (c *Client) verify(ctx context.Context, api *chatgpt.Client) error {
+func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) error {
 	for _, state := range c.meta.Rooms {
 		r, err := api.Verify(ctx, state.Profile)
 		if err != nil {
@@ -220,39 +249,24 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client) error {
 		if current.DotMember != state.DotMember || current.HumanMember != state.HumanMember {
 			return errors.New("Dot room members changed; refusing to change existing identity mappings")
 		}
-		selfData, selfErr := api.SelfAvatar(ctx, state.Profile)
-		selfHash := ""
-		if len(selfData) > 0 {
-			hash := sha256.Sum256(selfData)
-			selfHash = hex.EncodeToString(hash[:])
-		}
-		c.mu.RLock()
-		selfMXC, selfFile := c.login.RemoteProfile.Avatar, c.login.RemoteProfile.AvatarFile
-		previousHash := c.meta.SelfAvatarHash
-		c.mu.RUnlock()
-		if selfErr == nil && len(selfData) > 0 && (selfHash != previousHash || selfMXC == "") {
-			selfMXC, selfFile, selfErr = c.connector.bridge.Bot.UploadMedia(ctx, "", selfData, "avatar", http.DetectContentType(selfData))
-		} else if selfErr == nil && len(selfData) == 0 {
-			selfMXC, selfFile = "", nil
-		}
-		if selfErr != nil {
-			c.login.Log.Warn().Err(selfErr).Msg("Could not update own account avatar")
+		if avatars {
+			c.refreshSelfAvatar(ctx, api, state)
+			c.refreshDotAvatar(ctx, api, state)
 		}
 		c.mu.Lock()
+		changed := avatars || state.HumanName != current.HumanName || c.login.RemoteProfile.Name != current.HumanName
 		state.HumanName = current.HumanName
 		c.login.RemoteProfile.Name = current.HumanName
-		if api.Identity.Email != "" {
-			c.login.RemoteName = api.Identity.Email
-			c.login.RemoteProfile.Email = api.Identity.Email
+		if email := api.Identity.Email; email != "" {
+			changed = changed || c.login.RemoteName != email || c.login.RemoteProfile.Email != email
+			c.login.RemoteName = email
+			c.login.RemoteProfile.Email = email
 		}
-		if selfErr == nil {
-			c.login.RemoteProfile.Avatar = selfMXC
-			c.login.RemoteProfile.AvatarFile = selfFile
-			c.meta.SelfAvatarHash = selfHash
-		}
-		if err = c.login.Save(ctx); err != nil {
-			c.mu.Unlock()
-			return err
+		if changed {
+			if err = c.login.Save(ctx); err != nil {
+				c.mu.Unlock()
+				return err
+			}
 		}
 		c.mu.Unlock()
 		ghost, err := c.connector.bridge.GetGhostByID(ctx, c.GetUserID())
@@ -264,19 +278,6 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client) error {
 			return err
 		}
 		ghost.UpdateInfo(ctx, selfInfo)
-		avatarData, avatarErr := api.Avatar(ctx, state.Profile)
-		if avatarErr != nil {
-			c.login.Log.Warn().Err(avatarErr).Msg("Could not update Dot avatar")
-		} else if len(avatarData) > 0 {
-			hash := sha256.Sum256(avatarData)
-			c.mu.Lock()
-			state.Avatar = &bridgev2.Avatar{ID: networkid.AvatarID(hex.EncodeToString(hash[:])), Get: func(context.Context) ([]byte, error) { return avatarData, nil }}
-			c.mu.Unlock()
-		} else {
-			c.mu.Lock()
-			state.Avatar = &bridgev2.Avatar{Remove: true}
-			c.mu.Unlock()
-		}
 		portal, err := c.connector.bridge.GetPortalByKey(ctx, c.key(state))
 		if err != nil {
 			return err
@@ -285,11 +286,59 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client) error {
 			if err = portal.CreateMatrixRoom(ctx, c.login, c.chatInfo(state)); err != nil {
 				return err
 			}
+			clear(c.delivered)
+			c.deliveredOrder = nil
+			c.rescan.Store(true)
 		} else {
 			portal.UpdateInfo(ctx, c.chatInfo(state), c.login, nil, time.Time{})
 		}
 	}
 	return nil
+}
+func (c *Client) refreshSelfAvatar(ctx context.Context, api *chatgpt.Client, state *RoomState) {
+	data, err := api.SelfAvatar(ctx, state.Profile)
+	if err != nil {
+		c.login.Log.Warn().Err(err).Msg("Could not update own account avatar")
+		return
+	}
+	hash := ""
+	if len(data) > 0 {
+		sum := sha256.Sum256(data)
+		hash = hex.EncodeToString(sum[:])
+	}
+	c.mu.RLock()
+	unchanged := hash == c.meta.SelfAvatarHash && (c.login.RemoteProfile.Avatar != "") == (len(data) > 0)
+	c.mu.RUnlock()
+	if unchanged {
+		return
+	}
+	var mxc id.ContentURIString
+	var file *event.EncryptedFileInfo
+	if len(data) > 0 {
+		if mxc, file, err = c.connector.bridge.Bot.UploadMedia(ctx, "", data, "avatar", http.DetectContentType(data)); err != nil {
+			c.login.Log.Warn().Err(err).Msg("Could not update own account avatar")
+			return
+		}
+	}
+	c.mu.Lock()
+	c.login.RemoteProfile.Avatar, c.login.RemoteProfile.AvatarFile = mxc, file
+	c.meta.SelfAvatarHash = hash
+	c.mu.Unlock()
+}
+func (c *Client) refreshDotAvatar(ctx context.Context, api *chatgpt.Client, state *RoomState) {
+	data, err := api.Avatar(ctx, state.Profile)
+	if err != nil {
+		c.login.Log.Warn().Err(err).Msg("Could not update Dot avatar")
+		return
+	}
+	avatar := &bridgev2.Avatar{Remove: true}
+	if len(data) > 0 {
+		hash := sha256.Sum256(data)
+		avatar = &bridgev2.Avatar{ID: networkid.AvatarID(hex.EncodeToString(hash[:])), Get: func(context.Context) ([]byte, error) { return data, nil }}
+	}
+	c.mu.Lock()
+	state.Avatar = avatar
+	c.mu.Unlock()
 }
 func (c *Client) key(s *RoomState) networkid.PortalKey {
 	return networkid.PortalKey{ID: networkid.PortalID(s.Profile.Room), Receiver: c.login.ID}
@@ -365,19 +414,37 @@ func messageRevision(m chatgpt.Message, includeUpdateTime bool) string {
 	hash := sha256.Sum256([]byte(updated + "\x00" + m.Content.Text + fmt.Sprint(m.Deleted) + "\x00" + string(encoded)))
 	return hex.EncodeToString(hash[:])
 }
+func messageFingerprint(m chatgpt.Message) ([32]byte, bool) {
+	data, err := json.Marshal(m)
+	return sha256.Sum256(data), err == nil
+}
+func (c *Client) advanceCursor(ctx context.Context, state *RoomState, id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if state.Cursor == id || slices.Contains(state.Overlap, id) {
+		return nil
+	}
+	oldCursor, oldOverlap := state.Cursor, state.Overlap
+	state.Overlap = append(slices.Clone(state.Overlap), id)
+	if len(state.Overlap) > 33 {
+		state.Overlap = state.Overlap[len(state.Overlap)-33:]
+	}
+	state.Cursor = id
+	if err := c.login.Save(ctx); err != nil {
+		state.Cursor, state.Overlap = oldCursor, oldOverlap
+		return err
+	}
+	return nil
+}
 func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
 	if c.rescan.Swap(false) {
 		c.lastFullScan = time.Time{}
 	}
-	full := time.Since(c.lastFullScan) >= time.Minute
+	full := time.Since(c.lastFullScan) >= fullScanInterval
 	for _, state := range c.meta.Rooms {
-		receipt, receiptChanged, err := c.readReceipt(ctx, api, state)
+		receipt, err := c.readReceipt(ctx, api, state)
 		if err != nil {
 			return err
-		}
-		if receiptChanged {
-			c.lastFullScan = time.Time{}
-			full = true
 		}
 		c.mu.RLock()
 		var pendingIDs []string
@@ -423,40 +490,29 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
 				if m.ID == state.Baseline || m.Created.Before(state.Linked) {
 					continue
 				}
-				if err = c.deliver(ctx, state, m); err != nil {
-					return err
-				}
-				if err = c.syncReactions(ctx, state, m); err != nil {
-					return err
-				}
-				if m.Sender == state.HumanMember && m.Deleted == nil && !m.Created.After(receipt.Native.ReadAt) && m.Created.After(receipt.TargetTime) {
-					receipt.Target, receipt.TargetTime = networkid.MessageID(m.ID), m.Created
-				}
-				c.mu.Lock()
-				oldCursor, oldOverlap := state.Cursor, append([]string(nil), state.Overlap...)
-				if state.Cursor != m.ID {
-					exists := false
-					for _, id := range state.Overlap {
-						if id == m.ID {
-							exists = true
-						}
+				fingerprint, ok := messageFingerprint(m)
+				if full || !ok || c.delivered[m.ID] != fingerprint {
+					if err = c.deliver(ctx, state, m); err != nil {
+						return err
 					}
-					if !exists {
-						state.Overlap = append(state.Overlap, m.ID)
-						if len(state.Overlap) > 33 {
-							state.Overlap = state.Overlap[len(state.Overlap)-33:]
+					if err = c.syncReactions(ctx, state, m); err != nil {
+						return err
+					}
+					if ok {
+						if _, exists := c.delivered[m.ID]; !exists {
+							if len(c.deliveredOrder) == 33 {
+								delete(c.delivered, c.deliveredOrder[0])
+								c.deliveredOrder = c.deliveredOrder[1:]
+							}
+							c.deliveredOrder = append(c.deliveredOrder, m.ID)
 						}
-						state.Cursor = m.ID
+						c.delivered[m.ID] = fingerprint
 					}
 				}
-				err = c.login.Save(ctx)
-				if err != nil {
-					state.Cursor = oldCursor
-					state.Overlap = oldOverlap
-				}
-				c.mu.Unlock()
-				if err != nil {
-					return err
+				if !full {
+					if err = c.advanceCursor(ctx, state, m.ID); err != nil {
+						return err
+					}
 				}
 			}
 			if len(page.Items) == 0 || (len(page.Items) < 32 && page.Next == "") {
