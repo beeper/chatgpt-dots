@@ -491,7 +491,7 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
 					continue
 				}
 				fingerprint, ok := messageFingerprint(m)
-				if !ok || c.delivered[m.ID] != fingerprint {
+				if full || !ok || c.delivered[m.ID] != fingerprint {
 					if err = c.deliver(ctx, state, m); err != nil {
 						return err
 					}

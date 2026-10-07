@@ -34,8 +34,9 @@ Linking records a baseline without importing earlier history. REST polling
 fetches new messages and rechecks recent ones every 3 seconds, or every 30
 seconds while the native WebSocket is connected. A full scan of post-link
 history runs on connect and every 30 minutes, so edits and reactions on older
-messages can take that long to appear. Messages unchanged since they were last
-bridged are skipped.
+messages can take that long to appear. Normal polls skip unchanged recent
+messages. Full scans reconcile every post-link message, including task cards
+whose status can change without changing their attachment message.
 
 Native message IDs and stable attachment-part IDs map to Matrix events.
 Delivery is synchronous, with checkpoints saved after all parts are persisted.
@@ -45,8 +46,9 @@ allowing uncertain sends to be checked before retrying.
 Text is rendered as safe Matrix HTML. Media uses native room uploads and Matrix
 media transfer, with a 20 MiB bridge limit. Task attachments become cards whose
 title and status update in place, not Matrix threads. Cards refresh every few
-seconds while changing, back off while unchanged, and stop updating once the
-task has been finished for an hour.
+seconds while changing and back off while unchanged. After a successful refresh
+confirms a task has been finished for an hour, its card leaves frequent polling.
+Full scans still refresh it to recover later resumes.
 
 ## Native activity
 
