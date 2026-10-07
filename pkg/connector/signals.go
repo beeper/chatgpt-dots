@@ -13,19 +13,10 @@ import (
 )
 
 type receiptState struct {
-	Native         chatgpt.ReadReceipt
-	Target         networkid.MessageID
-	TargetTime     time.Time
-	ResolvedReadAt time.Time
-	SentTarget     networkid.MessageID
-	SentTime       time.Time
+	Native     chatgpt.ReadReceipt
+	SentReadAt time.Time
+	SentTime   time.Time
 }
-
-type nativeReceipt struct {
-	simplevent.Receipt
-}
-
-func (r *nativeReceipt) GetTimestamp() time.Time { return r.Timestamp }
 
 type nativeTyping struct {
 	simplevent.Typing
@@ -163,38 +154,19 @@ func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *Ro
 }
 
 func (c *Client) sendReceipt(ctx context.Context, state *RoomState, receipt *receiptState) error {
-	if receipt.Native.ReadAt.After(receipt.ResolvedReadAt) {
-		parts, err := c.connector.bridge.DB.Message.GetMessagesBetweenTimeQuery(ctx, c.key(state), receipt.TargetTime, receipt.Native.ReadAt)
-		if err != nil {
-			return err
-		}
-		for _, part := range parts {
-			if part.SenderID != c.GetUserID() || part.HasFakeMXID() || part.PartID == "deleted" || part.ID == networkid.MessageID(state.Baseline) || part.Timestamp.Before(state.Linked) {
-				continue
-			}
-			if part.Timestamp.After(receipt.TargetTime) {
-				receipt.Target, receipt.TargetTime = part.ID, part.Timestamp
-			}
-		}
-		receipt.ResolvedReadAt = receipt.Native.ReadAt
-	}
-	if receipt.Target == "" || (receipt.Target == receipt.SentTarget && receipt.Native.Updated.Equal(receipt.SentTime)) {
+	if receipt.Native.ReadAt.IsZero() || (receipt.Native.ReadAt.Equal(receipt.SentReadAt) && receipt.Native.Updated.Equal(receipt.SentTime)) {
 		return nil
 	}
-	part, err := c.connector.bridge.DB.Message.GetLastPartByID(ctx, c.login.ID, receipt.Target)
-	if err != nil {
-		return err
-	}
-	if part == nil || part.HasFakeMXID() || part.Room != c.key(state) || part.SenderID != c.GetUserID() {
-		return errors.New("Dot read receipt target is not a mapped outgoing message")
-	}
-	evt := &nativeReceipt{simplevent.Receipt{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventReadReceipt, PortalKey: c.key(state), Sender: bridgev2.EventSender{Sender: c.dotID(state)}, Timestamp: receipt.Native.Updated}, LastTarget: receipt.Target}}
+	evt := &simplevent.Receipt{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventReadReceipt, PortalKey: c.key(state), Sender: bridgev2.EventSender{Sender: c.dotID(state)}, Timestamp: receipt.Native.Updated}, ReadUpTo: receipt.Native.ReadAt}
 	evt.MutateContextFunc = func(context.Context) context.Context { return ctx }
 	result := c.login.QueueRemoteEvent(evt)
-	if !result.Success || result.Ignored {
+	if result.Ignored {
+		return nil
+	}
+	if !result.Success {
 		return errors.New("could not bridge Dot read receipt")
 	}
-	receipt.SentTarget, receipt.SentTime = receipt.Target, receipt.Native.Updated
+	receipt.SentReadAt, receipt.SentTime = receipt.Native.ReadAt, receipt.Native.Updated
 	return nil
 }
 

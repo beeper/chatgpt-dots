@@ -509,9 +509,6 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
 						c.delivered[m.ID] = fingerprint
 					}
 				}
-				if m.Sender == state.HumanMember && m.Deleted == nil && !m.Created.After(receipt.Native.ReadAt) && m.Created.After(receipt.TargetTime) {
-					receipt.Target, receipt.TargetTime = networkid.MessageID(m.ID), m.Created
-				}
 				if !full {
 					if err = c.advanceCursor(ctx, state, m.ID); err != nil {
 						return err
