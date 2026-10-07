@@ -81,7 +81,7 @@ func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) e
 		return errors.New("unexpected ChatGPT messaging socket origin")
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	conn, _, err := websocket.Dial(dialCtx, endpoint.URL, &websocket.DialOptions{HTTPClient: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}})
+	conn, _, err := websocket.Dial(dialCtx, endpoint.URL, &websocket.DialOptions{HTTPClient: &http.Client{Transport: c.http.Transport, CheckRedirect: c.http.CheckRedirect}})
 	cancel()
 	if err != nil {
 		return errors.New("ChatGPT messaging socket connection failed")

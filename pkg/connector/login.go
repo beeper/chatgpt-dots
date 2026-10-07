@@ -139,7 +139,15 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 	}
 	ctx, l.cancel = context.WithCancel(ctx)
 	l.mu.Unlock()
-	api, err := chatgpt.New(credentials, l.transport)
+	transport := l.transport
+	if transport == nil {
+		proxy := &proxyTransport{connector: l.connector}
+		if err := proxy.update(ctx, "login"); err != nil {
+			return nil, err
+		}
+		transport = proxy
+	}
+	api, err := chatgpt.New(credentials, transport)
 	if err != nil {
 		return nil, err
 	}
