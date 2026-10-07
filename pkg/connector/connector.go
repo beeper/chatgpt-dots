@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"sync"
 	"time"
@@ -13,11 +14,19 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
+//go:embed example-config.yaml
+var ExampleConfig string
+
+type Config struct {
+	Proxy       string `yaml:"proxy"`
+	GetProxyURL string `yaml:"get_proxy_url"`
+}
+
 type Connector struct {
 	bridge     *bridgev2.Bridge
 	loginMu    sync.Mutex
 	loggingOut map[networkid.UserLoginID]bool
-	Config     struct{}
+	Config     Config
 }
 
 func (c *Connector) Init(b *bridgev2.Bridge) {
@@ -56,7 +65,10 @@ func (c *Connector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 }
 func (c *Connector) GetBridgeInfoVersion() (int, int) { return 2, 4 }
 func (c *Connector) GetConfig() (string, any, configupgrade.Upgrader) {
-	return "{}\n", &c.Config, configupgrade.SimpleUpgrader(func(configupgrade.Helper) {})
+	return ExampleConfig, &c.Config, configupgrade.SimpleUpgrader(func(helper configupgrade.Helper) {
+		helper.Copy(configupgrade.Str|configupgrade.Null, "proxy")
+		helper.Copy(configupgrade.Str|configupgrade.Null, "get_proxy_url")
+	})
 }
 func (c *Connector) LoadUserLogin(_ context.Context, l *bridgev2.UserLogin) error {
 	l.Client = &Client{connector: c, login: l, meta: l.Metadata.(*LoginMetadata)}

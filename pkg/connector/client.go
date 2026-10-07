@@ -133,7 +133,8 @@ func (c *Client) run(ctx context.Context) {
 		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateBadCredentials, Message: err.Error()})
 		return
 	}
-	api, err := chatgpt.New(creds, nil)
+	proxy := &proxyTransport{connector: c.connector}
+	api, err := chatgpt.New(creds, proxy)
 	if err != nil {
 		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateBadCredentials, Message: err.Error()})
 		return
@@ -152,7 +153,9 @@ func (c *Client) run(ctx context.Context) {
 	}
 	delay := time.Second * 3
 	for ctx.Err() == nil {
-		err = c.verify(ctx, api, true)
+		if err = proxy.update(ctx, "connect"); err == nil {
+			err = c.verify(ctx, api, true)
+		}
 		if err == nil {
 			break
 		}
@@ -201,6 +204,15 @@ func (c *Client) run(ctx context.Context) {
 				c.login.Log.Warn().Err(profileErr).Msg("Could not refresh ChatGPT profiles")
 			}
 			nextProfileRefresh = time.Now().Add(time.Minute)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if proxy.failed.Load() {
+			if proxyErr := proxy.update(ctx, "connect"); proxyErr != nil {
+				c.login.Log.Warn().Err(proxyErr).Msg("Could not refresh ChatGPT proxy")
+				err = errors.Join(err, proxyErr)
+			}
 		}
 		if err != nil {
 			if ctx.Err() != nil {
