@@ -51,6 +51,6 @@ tasks attached to those rooms.
 
 ## License
 
-[GNU GPL v3.0](LICENSE). Copyright (c) 2026 Beeper.
+[GNU AGPL v3.0](LICENSE). Copyright (c) 2026 Beeper.
 Dependencies retain their own licenses; see
 [third-party notices](THIRD_PARTY_NOTICES.md).

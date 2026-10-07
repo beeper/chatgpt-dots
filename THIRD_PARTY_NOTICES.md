@@ -27,7 +27,7 @@ standalone `goolm` build, along with the Go standard library license. Keep that
 bundle current when dependencies change. Alternative build configurations can
 require additional notices, including libolm when building without `goolm`.
 
-The bridge's original source is licensed under [GNU GPL v3.0](LICENSE).
+The bridge's original source is licensed under [GNU AGPL v3.0](LICENSE).
 Dependencies retain their own terms. Binary distributors must preserve
 applicable notices and provide corresponding source as required by those terms.
 The repository, its pinned module graph and build scripts identify the source
