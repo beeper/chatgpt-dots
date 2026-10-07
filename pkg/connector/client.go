@@ -119,7 +119,7 @@ func (c *Client) run(ctx context.Context) {
 		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateBadCredentials, Message: err.Error()})
 		return
 	}
-	api, err := chatgpt.New(creds)
+	api, err := chatgpt.New(creds, nil)
 	if err != nil {
 		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateBadCredentials, Message: err.Error()})
 		return

@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -59,7 +62,10 @@ type Login struct {
 	mu        sync.Mutex
 	cancel    context.CancelFunc
 	cancelled bool
+	transport http.RoundTripper
 }
+
+var _ bridgev2.LoginProcessWithParams = (*Login)(nil)
 
 func (c *Connector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{{ID: "cookies", Name: "ChatGPT Dots", Description: "Sign in with ChatGPT to message your existing Dot. Regular ChatGPT conversations are not imported."}}
@@ -70,7 +76,11 @@ func (c *Connector) CreateLogin(_ context.Context, u *bridgev2.User, flow string
 	}
 	return &Login{connector: c, user: u}, nil
 }
-func (l *Login) Start(context.Context) (*bridgev2.LoginStep, error) {
+func (l *Login) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
+	return l.StartWithParams(ctx, bridgev2.LoginStartParams{})
+}
+func (l *Login) StartWithParams(_ context.Context, params bridgev2.LoginStartParams) (*bridgev2.LoginStep, error) {
+	l.transport = params.HTTP
 	instructions := "Connect ChatGPT Dots: sign in with ChatGPT to message your existing Dot. Regular ChatGPT conversations are not imported. ChatGPT credentials grant broader account access, not a provider-enforced Dots-only scope. This bridge uses them only for authentication, Dot discovery, verified Dot room messaging and status reads for tasks attached to those rooms. Credentials are stored by the bridge runtime. Logout removes this bridge's copy, not your ChatGPT browser session. Provider session renewal is automatic while the session remains valid; reconnect if ChatGPT revokes it."
 
 	return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeCookies, StepID: "chatgpt-dots.cookies", Instructions: instructions, CookiesParams: &bridgev2.LoginCookiesParams{
@@ -105,7 +115,18 @@ func (l *Login) Cancel() {
 	}
 }
 func (l *Login) SubmitCookies(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
-	return l.submit(ctx, chatgpt.Credentials{AccessToken: input["access_token"], SessionToken: input["session_token"]})
+	step, err := l.submit(ctx, chatgpt.Credentials{AccessToken: input["access_token"], SessionToken: input["session_token"]})
+	var providerError *chatgpt.HTTPError
+	if errors.As(err, &providerError) {
+		if providerError.PrimaryUnavailable {
+			if l.transport != nil {
+				return nil, bridgev2.RespError(mautrix.MForbidden.WithMessage("ChatGPT Dots is not available in your area yet."))
+			}
+			return nil, bridgev2.RespError(mautrix.MUnknown.WithMessage("ChatGPT Dots is not available from this bridge's region. Please contact Beeper support."))
+		}
+		return nil, bridgev2.WrapRespErr(fmt.Errorf("ChatGPT Dots setup failed while %w. Retry setup, or contact Beeper support if this continues", err), mautrix.MUnknown)
+	}
+	return step, err
 }
 func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*bridgev2.LoginStep, error) {
 	if credentials.SessionToken == "" {
@@ -118,7 +139,7 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 	}
 	ctx, l.cancel = context.WithCancel(ctx)
 	l.mu.Unlock()
-	api, err := chatgpt.New(credentials)
+	api, err := chatgpt.New(credentials, l.transport)
 	if err != nil {
 		return nil, err
 	}

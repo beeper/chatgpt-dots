@@ -94,7 +94,10 @@ type Page struct {
 	Next  string    `json:"next_cursor"`
 	Prev  string    `json:"prev_cursor"`
 }
-type HTTPError struct{ Status int }
+type HTTPError struct {
+	Status             int
+	PrimaryUnavailable bool
+}
 
 func (e *HTTPError) Error() string {
 	switch e.Status {
@@ -103,7 +106,7 @@ func (e *HTTPError) Error() string {
 	case 403:
 		return "ChatGPT denied access or requires provider verification; open ChatGPT, then reconnect (no challenge bypass)"
 	case 404:
-		return "Dot room unavailable; check the Dot in ChatGPT"
+		return "ChatGPT returned HTTP 404"
 	case 429:
 		return "ChatGPT rate limit; delivery will retry after backoff"
 	default:
@@ -121,12 +124,12 @@ type Client struct {
 	PersistCredentials func(Credentials) error
 }
 
-func New(c Credentials) (*Client, error) {
+func New(c Credentials, transport http.RoundTripper) (*Client, error) {
 	identity, err := c.Identity()
 	if err != nil {
 		return nil, err
 	}
-	return &Client{credentials: c, Identity: identity, http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, rooms: map[string]bool{}}, nil
+	return &Client{credentials: c, Identity: identity, http: &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, rooms: map[string]bool{}}, nil
 }
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	return c.doAt(ctx, "https://chatgpt.com/backend-api", method, path, body, out)
@@ -183,7 +186,14 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &HTTPError{resp.StatusCode}
+		failure := &HTTPError{Status: resp.StatusCode}
+		if resp.StatusCode == http.StatusNotFound && req.URL.Path == "/backend-api/tbo/primary" {
+			var body struct {
+				Detail string `json:"detail"`
+			}
+			failure.PrimaryUnavailable = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body) == nil && body.Detail == "Not Found"
+		}
+		return failure
 	}
 	if err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out); err != nil {
 		return errors.New("unexpected ChatGPT response schema")
@@ -202,7 +212,7 @@ func (c *Client) Refresh(ctx context.Context) error {
 }
 func (c *Client) refresh(ctx context.Context) error {
 	if c.credentials.SessionToken == "" {
-		return &HTTPError{401}
+		return &HTTPError{Status: 401}
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://chatgpt.com/api/auth/session", nil)
 	if err != nil {
@@ -216,14 +226,14 @@ func (c *Client) refresh(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return &HTTPError{resp.StatusCode}
+		return fmt.Errorf("renewing the ChatGPT session: %w", &HTTPError{Status: resp.StatusCode})
 	}
 	var session struct {
 		Access  string `json:"accessToken"`
 		Session string `json:"sessionToken"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&session) != nil || session.Access == "" || session.Session == "" {
-		return &HTTPError{401}
+		return &HTTPError{Status: 401}
 	}
 	updated := Credentials{AccessToken: session.Access, SessionToken: session.Session}
 	identity, err := updated.Identity()
@@ -249,7 +259,7 @@ func (c *Client) Discover(ctx context.Context) ([]Profile, error) {
 		} `json:"selection"`
 	}
 	if err := c.do(ctx, "GET", "/tbo/primary", nil, &primary); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("finding the primary Dot: %w", err)
 	}
 	if primary.Selection == nil || !primary.Selection.Available {
 		return nil, errors.New("no available primary Dot; select an existing Dot in ChatGPT")
@@ -260,7 +270,7 @@ func (c *Client) Discover(ctx context.Context) ([]Profile, error) {
 		return nil, errors.New("primary Dot has incomplete identity")
 	}
 	if err := c.do(ctx, "GET", "/tbo/by-thread/"+url.PathEscape(s.Thread), nil, &p); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading the Dot profile: %w", err)
 	}
 	if p.Status != "active" || p.ID != s.Aeon || p.Room != s.Room || (p.Thread != "" && p.Thread != s.Thread) {
 		return nil, errors.New("Dot profile identity mismatch")
@@ -270,7 +280,7 @@ func (c *Client) Discover(ctx context.Context) ([]Profile, error) {
 func (c *Client) Verify(ctx context.Context, p Profile) (*Room, error) {
 	var r Room
 	if err := c.do(ctx, "GET", "/messaging/rooms/"+url.PathEscape(p.Room), nil, &r); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("verifying the Dot room: %w", err)
 	}
 	if r.Type != "DM" || r.Source != "chatgpt:messaging" || r.ID != p.Room || r.Aeon != p.ID {
 		return nil, errors.New("room is not the discovered Dot room")
@@ -295,7 +305,7 @@ func (c *Client) Verify(ctx context.Context, p Profile) (*Room, error) {
 			} `json:"items"`
 		}
 		if err := c.do(ctx, "GET", "/messaging/rooms/"+url.PathEscape(p.Room)+"/messages?limit=1", nil, &baseline); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("reading the Dot message baseline: %w", err)
 		}
 		r.Latest = baseline.Items
 	}
