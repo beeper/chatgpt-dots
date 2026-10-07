@@ -63,7 +63,7 @@ func (t *proxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		transport = current
 	}
 	resp, err := transport.RoundTrip(req)
-	if err != nil && req.Context().Err() == nil {
+	if err != nil && req.Context().Err() != context.Canceled {
 		t.failed.Store(true)
 	}
 	return resp, err

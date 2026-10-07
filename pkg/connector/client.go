@@ -205,16 +205,20 @@ func (c *Client) run(ctx context.Context) {
 			}
 			nextProfileRefresh = time.Now().Add(time.Minute)
 		}
+		if ctx.Err() != nil {
+			return
+		}
+		if proxy.failed.Load() {
+			if proxyErr := proxy.update(ctx, "connect"); proxyErr != nil {
+				c.login.Log.Warn().Err(proxyErr).Msg("Could not refresh ChatGPT proxy")
+				err = errors.Join(err, proxyErr)
+			}
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			c.state(err)
-			if proxy.failed.Load() {
-				if proxyErr := proxy.update(ctx, "connect"); proxyErr != nil {
-					c.login.Log.Warn().Err(proxyErr).Msg("Could not refresh ChatGPT proxy")
-				}
-			}
 			delay = min(delay*2, time.Minute)
 			nextPoll = time.Time{}
 		} else {
