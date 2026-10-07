@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,12 @@ import (
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
+)
+
+const (
+	pollInterval     = 3 * time.Second
+	livePollInterval = 30 * time.Second
+	fullScanInterval = 30 * time.Minute
 )
 
 type Client struct {
@@ -39,8 +46,10 @@ type Client struct {
 	lastFullScan   time.Time
 	threadMessages map[string]*threadMessage
 	signalWake     chan struct{}
+	signalsLive    atomic.Bool
 	rescan         atomic.Bool
 	receipts       map[string]*receiptState
+	delivered      map[string][32]byte
 }
 
 func (c *Client) Connect(ctx context.Context) {
@@ -110,6 +119,7 @@ func (c *Client) run(ctx context.Context) {
 	c.lastFullScan = time.Time{}
 	c.signalWake = make(chan struct{}, 1)
 	c.receipts = make(map[string]*receiptState)
+	c.delivered = make(map[string][32]byte)
 	for _, watch := range c.threadMessages {
 		watch.NextRefresh = time.Time{}
 	}
@@ -161,10 +171,18 @@ func (c *Client) run(ctx context.Context) {
 		c.streamSignals(streamCtx, api)
 	}()
 	defer func() { stopStream(); <-streamDone }()
-	delay = 3 * time.Second
+	delay = pollInterval
 	nextProfileRefresh := time.Now().Add(time.Minute)
+	var nextPoll time.Time
 	for ctx.Err() == nil {
-		err = c.poll(ctx, api)
+		err = nil
+		if !time.Now().Before(nextPoll) {
+			err = c.poll(ctx, api)
+			nextPoll = time.Now().Add(pollInterval)
+			if c.signalsLive.Load() {
+				nextPoll = time.Now().Add(livePollInterval)
+			}
+		}
 		threadErr := c.refreshThreads(ctx, api)
 		if err == nil {
 			err = threadErr
@@ -181,10 +199,11 @@ func (c *Client) run(ctx context.Context) {
 			}
 			c.state(err)
 			delay = min(delay*2, time.Minute)
+			nextPoll = time.Time{}
 		} else {
 			c.connected.Store(true)
 			c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
-			delay = 3 * time.Second
+			delay = pollInterval
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -193,6 +212,7 @@ func (c *Client) run(ctx context.Context) {
 			return
 		case <-c.signalWake:
 			timer.Stop()
+			nextPoll = time.Time{}
 		case <-timer.C:
 		}
 	}
@@ -285,6 +305,8 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client) error {
 			if err = portal.CreateMatrixRoom(ctx, c.login, c.chatInfo(state)); err != nil {
 				return err
 			}
+			clear(c.delivered)
+			c.rescan.Store(true)
 		} else {
 			portal.UpdateInfo(ctx, c.chatInfo(state), c.login, nil, time.Time{})
 		}
@@ -365,19 +387,37 @@ func messageRevision(m chatgpt.Message, includeUpdateTime bool) string {
 	hash := sha256.Sum256([]byte(updated + "\x00" + m.Content.Text + fmt.Sprint(m.Deleted) + "\x00" + string(encoded)))
 	return hex.EncodeToString(hash[:])
 }
+func messageFingerprint(m chatgpt.Message) ([32]byte, bool) {
+	data, err := json.Marshal(m)
+	return sha256.Sum256(data), err == nil
+}
+func (c *Client) advanceCursor(ctx context.Context, state *RoomState, id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if state.Cursor == id || slices.Contains(state.Overlap, id) {
+		return nil
+	}
+	oldCursor, oldOverlap := state.Cursor, state.Overlap
+	state.Overlap = append(slices.Clone(state.Overlap), id)
+	if len(state.Overlap) > 33 {
+		state.Overlap = state.Overlap[len(state.Overlap)-33:]
+	}
+	state.Cursor = id
+	if err := c.login.Save(ctx); err != nil {
+		state.Cursor, state.Overlap = oldCursor, oldOverlap
+		return err
+	}
+	return nil
+}
 func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
 	if c.rescan.Swap(false) {
 		c.lastFullScan = time.Time{}
 	}
-	full := time.Since(c.lastFullScan) >= time.Minute
+	full := time.Since(c.lastFullScan) >= fullScanInterval
 	for _, state := range c.meta.Rooms {
-		receipt, receiptChanged, err := c.readReceipt(ctx, api, state)
+		receipt, err := c.readReceipt(ctx, api, state)
 		if err != nil {
 			return err
-		}
-		if receiptChanged {
-			c.lastFullScan = time.Time{}
-			full = true
 		}
 		c.mu.RLock()
 		var pendingIDs []string
@@ -423,40 +463,25 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
 				if m.ID == state.Baseline || m.Created.Before(state.Linked) {
 					continue
 				}
-				if err = c.deliver(ctx, state, m); err != nil {
-					return err
-				}
-				if err = c.syncReactions(ctx, state, m); err != nil {
-					return err
+				fingerprint, ok := messageFingerprint(m)
+				if !ok || c.delivered[m.ID] != fingerprint {
+					if err = c.deliver(ctx, state, m); err != nil {
+						return err
+					}
+					if err = c.syncReactions(ctx, state, m); err != nil {
+						return err
+					}
+					if ok {
+						c.delivered[m.ID] = fingerprint
+					}
 				}
 				if m.Sender == state.HumanMember && m.Deleted == nil && !m.Created.After(receipt.Native.ReadAt) && m.Created.After(receipt.TargetTime) {
 					receipt.Target, receipt.TargetTime = networkid.MessageID(m.ID), m.Created
 				}
-				c.mu.Lock()
-				oldCursor, oldOverlap := state.Cursor, append([]string(nil), state.Overlap...)
-				if state.Cursor != m.ID {
-					exists := false
-					for _, id := range state.Overlap {
-						if id == m.ID {
-							exists = true
-						}
+				if !full {
+					if err = c.advanceCursor(ctx, state, m.ID); err != nil {
+						return err
 					}
-					if !exists {
-						state.Overlap = append(state.Overlap, m.ID)
-						if len(state.Overlap) > 33 {
-							state.Overlap = state.Overlap[len(state.Overlap)-33:]
-						}
-						state.Cursor = m.ID
-					}
-				}
-				err = c.login.Save(ctx)
-				if err != nil {
-					state.Cursor = oldCursor
-					state.Overlap = oldOverlap
-				}
-				c.mu.Unlock()
-				if err != nil {
-					return err
 				}
 			}
 			if len(page.Items) == 0 || (len(page.Items) < 32 && page.Next == "") {

@@ -30,8 +30,11 @@ separate. The account subtitle uses the authenticated email.
 ## Messages and recovery
 
 Linking records a baseline without importing earlier history. REST polling
-fetches new messages; periodic scans and restart reconciliation recover
-post-link changes.
+fetches new messages and rechecks recent ones every 3 seconds, or every 30
+seconds while the native WebSocket is connected. A full scan of post-link
+history runs on connect and every 30 minutes, so edits and reactions on older
+messages can take that long to appear. Messages unchanged since they were last
+bridged are skipped.
 
 Native message IDs and stable attachment-part IDs map to Matrix events.
 Delivery is synchronous, with checkpoints saved after all parts are persisted.

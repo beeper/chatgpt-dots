@@ -62,7 +62,8 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 		err := api.StreamSignals(ctx, func(signal chatgpt.Signal) error {
 			if signal.Type == "resync" {
 				clear()
-				c.requestSync(true)
+				c.signalsLive.Store(true)
+				c.requestSync(false)
 				return nil
 			}
 			state := c.meta.Rooms[signal.Payload.Room]
@@ -95,13 +96,15 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 					}
 				}
 				c.requestSync(false)
-			case "calpico-message-update", "calpico-room-leave":
-				c.requestSync(true)
-			case "calpico-room-read-receipt", "calpico-room-metadata-update":
+			case "calpico-message-update", "calpico-room-read-receipt", "calpico-room-metadata-update":
 				c.requestSync(false)
+			case "calpico-room-leave":
+				c.requestSync(true)
 			}
 			return nil
 		})
+		c.signalsLive.Store(false)
+		c.requestSync(false)
 		clear()
 		if ctx.Err() != nil {
 			return
@@ -129,10 +132,10 @@ func (c *Client) sendTyping(ctx context.Context, state *RoomState, timeout time.
 	return nil
 }
 
-func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *RoomState) (*receiptState, bool, error) {
+func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *RoomState) (*receiptState, error) {
 	room, err := api.RoomSignals(ctx, state.Profile)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	dot, human := false, false
 	for _, member := range room.Members {
@@ -140,24 +143,22 @@ func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *Ro
 		human = human || (member.ID == state.HumanMember && member.Aeon == "" && member.ID == api.Identity.User)
 	}
 	if len(room.Members) != 2 || !dot || !human {
-		return nil, false, errors.New("Dot room signal members changed")
+		return nil, errors.New("Dot room signal members changed")
 	}
 	receipt := c.receipts[state.Profile.Room]
 	if receipt == nil {
 		receipt = &receiptState{}
 		c.receipts[state.Profile.Room] = receipt
 	}
-	changed := false
 	for _, native := range room.ReadReceipts {
 		if native.Member != state.DotMember || native.ReadAt.IsZero() {
 			continue
 		}
 		if native.ReadAt.After(receipt.Native.ReadAt) || (native.ReadAt.Equal(receipt.Native.ReadAt) && receipt.Native.Updated.IsZero() && !native.Updated.IsZero()) {
 			receipt.Native = native
-			changed = true
 		}
 	}
-	return receipt, changed, nil
+	return receipt, nil
 }
 
 func (c *Client) sendReceipt(ctx context.Context, state *RoomState, receipt *receiptState) error {
