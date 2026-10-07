@@ -116,10 +116,6 @@ func (c *Client) prepareThreads(ctx context.Context, state *RoomState, m *chatgp
 func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error {
 	var result error
 	for key, watch := range c.threadMessages {
-		if threadsSettled(watch.Message.Threads) {
-			delete(c.threadMessages, key)
-			continue
-		}
 		if time.Now().Before(watch.NextRefresh) {
 			continue
 		}
@@ -151,6 +147,10 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 		if err := c.deliver(ctx, watch.Room, message); err != nil {
 			result = errors.Join(result, err)
 			watch.NextRefresh = time.Now().Add(3 * time.Second)
+			continue
+		}
+		if !failed && threadsSettled(watch.Message.Threads) {
+			delete(c.threadMessages, key)
 			continue
 		}
 		switch {

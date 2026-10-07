@@ -52,6 +52,7 @@ type Client struct {
 	rescan         atomic.Bool
 	receipts       map[string]*receiptState
 	delivered      map[string][32]byte
+	deliveredOrder []string
 }
 
 func (c *Client) Connect(ctx context.Context) {
@@ -122,6 +123,7 @@ func (c *Client) run(ctx context.Context) {
 	c.signalWake = make(chan struct{}, 1)
 	c.receipts = make(map[string]*receiptState)
 	c.delivered = make(map[string][32]byte)
+	c.deliveredOrder = nil
 	for _, watch := range c.threadMessages {
 		watch.NextRefresh = time.Time{}
 	}
@@ -285,6 +287,7 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) 
 				return err
 			}
 			clear(c.delivered)
+			c.deliveredOrder = nil
 			c.rescan.Store(true)
 		} else {
 			portal.UpdateInfo(ctx, c.chatInfo(state), c.login, nil, time.Time{})
@@ -496,6 +499,13 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
 						return err
 					}
 					if ok {
+						if _, exists := c.delivered[m.ID]; !exists {
+							if len(c.deliveredOrder) == 33 {
+								delete(c.delivered, c.deliveredOrder[0])
+								c.deliveredOrder = c.deliveredOrder[1:]
+							}
+							c.deliveredOrder = append(c.deliveredOrder, m.ID)
+						}
 						c.delivered[m.ID] = fingerprint
 					}
 				}

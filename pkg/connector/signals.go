@@ -13,11 +13,12 @@ import (
 )
 
 type receiptState struct {
-	Native     chatgpt.ReadReceipt
-	Target     networkid.MessageID
-	TargetTime time.Time
-	SentTarget networkid.MessageID
-	SentTime   time.Time
+	Native         chatgpt.ReadReceipt
+	Target         networkid.MessageID
+	TargetTime     time.Time
+	ResolvedReadAt time.Time
+	SentTarget     networkid.MessageID
+	SentTime       time.Time
 }
 
 type nativeReceipt struct {
@@ -162,6 +163,21 @@ func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *Ro
 }
 
 func (c *Client) sendReceipt(ctx context.Context, state *RoomState, receipt *receiptState) error {
+	if receipt.Native.ReadAt.After(receipt.ResolvedReadAt) {
+		parts, err := c.connector.bridge.DB.Message.GetMessagesBetweenTimeQuery(ctx, c.key(state), receipt.TargetTime, receipt.Native.ReadAt)
+		if err != nil {
+			return err
+		}
+		for _, part := range parts {
+			if part.SenderID != c.GetUserID() || part.HasFakeMXID() || part.PartID == "deleted" || part.ID == networkid.MessageID(state.Baseline) || part.Timestamp.Before(state.Linked) {
+				continue
+			}
+			if part.Timestamp.After(receipt.TargetTime) {
+				receipt.Target, receipt.TargetTime = part.ID, part.Timestamp
+			}
+		}
+		receipt.ResolvedReadAt = receipt.Native.ReadAt
+	}
 	if receipt.Target == "" || (receipt.Target == receipt.SentTarget && receipt.Native.Updated.Equal(receipt.SentTime)) {
 		return nil
 	}
