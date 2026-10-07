@@ -13,11 +13,22 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
+const taskWatchExpiry = time.Hour
+
 type threadMessage struct {
 	Room        *RoomState
 	Message     chatgpt.Message
 	NextRefresh time.Time
-	RetryDelay  time.Duration
+	Backoff     time.Duration
+}
+
+func threadsSettled(threads map[string]*chatgpt.ThreadStatus) bool {
+	for _, thread := range threads {
+		if !thread.Terminal() || time.Since(time.Unix(thread.UpdatedAt, 0)) < taskWatchExpiry {
+			return false
+		}
+	}
+	return len(threads) > 0
 }
 
 func threadBody(thread *chatgpt.ThreadStatus) string {
@@ -104,13 +115,17 @@ func (c *Client) prepareThreads(ctx context.Context, state *RoomState, m *chatgp
 
 func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error {
 	var result error
-	for _, watch := range c.threadMessages {
+	for key, watch := range c.threadMessages {
+		if threadsSettled(watch.Message.Threads) {
+			delete(c.threadMessages, key)
+			continue
+		}
 		if time.Now().Before(watch.NextRefresh) {
 			continue
 		}
 		message := watch.Message
 		message.Threads = make(map[string]*chatgpt.ThreadStatus, len(watch.Message.Threads))
-		allTerminal, failed := true, false
+		allTerminal, failed, changed := true, false, false
 		for threadID, previous := range watch.Message.Threads {
 			message.Threads[threadID] = previous
 			next, err := api.Thread(ctx, watch.Room.Profile.Room, message, threadID)
@@ -128,6 +143,7 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 			if previous != nil && (next.UpdatedAt < previous.UpdatedAt || next.StartedAt < previous.StartedAt || previous.Terminal() && next.TurnID == previous.TurnID && !next.Terminal() && next.UpdatedAt <= previous.UpdatedAt) {
 				next = previous
 			}
+			changed = changed || previous == nil || *next != *previous
 			message.Threads[threadID] = next
 			allTerminal = allTerminal && next.Terminal()
 		}
@@ -137,17 +153,17 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 			watch.NextRefresh = time.Now().Add(3 * time.Second)
 			continue
 		}
-		delay := 3 * time.Second
-		if failed {
-			watch.RetryDelay = min(max(watch.RetryDelay*2, delay), time.Minute)
-			delay = watch.RetryDelay
-		} else {
-			watch.RetryDelay = 0
-			if allTerminal {
-				delay = time.Minute
-			}
+		switch {
+		case failed:
+			watch.Backoff = min(max(watch.Backoff*2, 3*time.Second), time.Minute)
+		case changed:
+			watch.Backoff = 3 * time.Second
+		case allTerminal:
+			watch.Backoff = time.Minute
+		default:
+			watch.Backoff = min(max(watch.Backoff*2, 3*time.Second), 30*time.Second)
 		}
-		watch.NextRefresh = time.Now().Add(delay)
+		watch.NextRefresh = time.Now().Add(watch.Backoff)
 	}
 	return result
 }

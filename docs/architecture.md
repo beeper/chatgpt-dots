@@ -25,7 +25,8 @@ the existing mappings. Credential scope and storage are covered in
 [Security](../SECURITY.md).
 
 The Dot's avatar, authenticated user's profile and client network icon are
-separate. The account subtitle uses the authenticated email.
+separate. The account subtitle uses the authenticated email. Avatars refresh on
+connect and every 30 minutes.
 
 ## Messages and recovery
 
@@ -43,7 +44,9 @@ allowing uncertain sends to be checked before retrying.
 
 Text is rendered as safe Matrix HTML. Media uses native room uploads and Matrix
 media transfer, with a 20 MiB bridge limit. Task attachments become cards whose
-title and status update in place, not Matrix threads.
+title and status update in place, not Matrix threads. Cards refresh every few
+seconds while changing, back off while unchanged, and stop updating once the
+task has been finished for an hour.
 
 ## Native activity
 
