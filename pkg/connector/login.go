@@ -80,7 +80,9 @@ func (l *Login) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 	return l.StartWithParams(ctx, bridgev2.LoginStartParams{})
 }
 func (l *Login) StartWithParams(_ context.Context, params bridgev2.LoginStartParams) (*bridgev2.LoginStep, error) {
-	l.transport = params.HTTP
+	if !l.connector.hasProxy() {
+		l.transport = params.HTTP
+	}
 	instructions := "Connect ChatGPT Dots: sign in with ChatGPT to message your existing Dot. Regular ChatGPT conversations are not imported. ChatGPT credentials grant broader account access, not a provider-enforced Dots-only scope. This bridge uses them only for authentication, Dot discovery, verified Dot room messaging and status reads for tasks attached to those rooms. Credentials are stored by the bridge runtime. Logout removes this bridge's copy, not your ChatGPT browser session. Provider session renewal is automatic while the session remains valid; reconnect if ChatGPT revokes it."
 
 	return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeCookies, StepID: "chatgpt-dots.cookies", Instructions: instructions, CookiesParams: &bridgev2.LoginCookiesParams{
@@ -141,7 +143,7 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 	l.mu.Unlock()
 	transport := l.transport
 	if transport == nil {
-		proxy := &proxyTransport{connector: l.connector}
+		proxy := &proxyTransport{connector: l.connector, log: l.user.Log}
 		if err := proxy.update(ctx, "login"); err != nil {
 			return nil, err
 		}

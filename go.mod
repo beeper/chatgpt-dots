@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
+	github.com/rs/zerolog v1.35.1
 	github.com/yuin/goldmark v1.8.6
 	go.mau.fi/util v0.10.2-0.20260925162539-904010e9796c
 	maunium.net/go/mautrix v0.31.1-0.20260930132709-247fcba49d83
@@ -19,7 +20,6 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.52 // indirect
 	github.com/petermattis/goid v0.0.0-20260820044319-269ab09b5261 // indirect
 	github.com/rs/xid v1.6.0 // indirect
-	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e // indirect
 	github.com/tidwall/gjson v1.19.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
