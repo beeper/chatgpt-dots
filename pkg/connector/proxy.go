@@ -11,11 +11,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
 )
 
 type respGetProxy struct {
 	ProxyURL string `json:"proxy_url"`
+}
+
+func (c *Connector) hasProxy() bool {
+	return c.Config.Proxy != "" || c.Config.GetProxyURL != ""
 }
 
 func (c *Connector) getProxy(ctx context.Context, reason string) (string, error) {
@@ -53,6 +58,7 @@ func (c *Connector) getProxy(ctx context.Context, reason string) (string, error)
 
 type proxyTransport struct {
 	connector *Connector
+	log       zerolog.Logger
 	current   atomic.Pointer[http.Transport]
 	failed    atomic.Bool
 }
@@ -70,7 +76,7 @@ func (t *proxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func (t *proxyTransport) update(ctx context.Context, reason string) error {
-	if t.connector.Config.Proxy == "" && t.connector.Config.GetProxyURL == "" {
+	if !t.connector.hasProxy() {
 		return nil
 	}
 	addr, err := t.connector.getProxy(ctx, reason)
@@ -84,6 +90,7 @@ func (t *proxyTransport) update(ctx context.Context, reason string) error {
 			return errors.New("invalid proxy address")
 		}
 		transport.Proxy = http.ProxyURL(parsed)
+		t.log.Info().Str("reason", reason).Str("proxy_host", parsed.Host).Msg("Using proxy")
 	}
 	t.failed.Store(false)
 	if old := t.current.Swap(transport); old != nil {

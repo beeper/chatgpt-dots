@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"maunium.net/go/mautrix/bridgev2"
 )
 
 func TestProxyTransportUpdate(t *testing.T) {
@@ -49,5 +51,29 @@ func TestProxyTransportMarksFailures(t *testing.T) {
 	}
 	if !proxy.failed.Load() {
 		t.Fatal("transport failure was not recorded")
+	}
+}
+
+type clientHTTP struct{ http.RoundTripper }
+
+func (clientHTTP) SetFingerprint(string) {}
+
+func TestLoginUsesProxyOverClientHTTP(t *testing.T) {
+	params := bridgev2.LoginStartParams{HTTP: clientHTTP{http.DefaultTransport}}
+
+	direct := &Login{connector: &Connector{}}
+	if _, err := direct.StartWithParams(context.Background(), params); err != nil {
+		t.Fatal(err)
+	}
+	if direct.transport == nil {
+		t.Fatal("login without a proxy should use the client HTTP transport")
+	}
+
+	proxied := &Login{connector: &Connector{Config: Config{GetProxyURL: "https://proxyserv.example"}}}
+	if _, err := proxied.StartWithParams(context.Background(), params); err != nil {
+		t.Fatal(err)
+	}
+	if proxied.transport != nil {
+		t.Fatal("login with a proxy should not use the client HTTP transport")
 	}
 }

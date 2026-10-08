@@ -133,7 +133,7 @@ func (c *Client) run(ctx context.Context) {
 		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateBadCredentials, Message: err.Error()})
 		return
 	}
-	proxy := &proxyTransport{connector: c.connector}
+	proxy := &proxyTransport{connector: c.connector, log: c.login.Log}
 	api, err := chatgpt.New(creds, proxy)
 	if err != nil {
 		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateBadCredentials, Message: err.Error()})
