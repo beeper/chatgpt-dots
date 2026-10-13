@@ -243,7 +243,10 @@ func (c *Client) refresh(ctx context.Context) error {
 		Access  string `json:"accessToken"`
 		Session string `json:"sessionToken"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&session) != nil || session.Access == "" || session.Session == "" {
+	if json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&session) != nil {
+		return errors.New("unexpected ChatGPT session renewal response; retrying")
+	}
+	if session.Access == "" || session.Session == "" {
 		return &HTTPError{Status: 401}
 	}
 	updated := Credentials{AccessToken: session.Access, SessionToken: session.Session}
