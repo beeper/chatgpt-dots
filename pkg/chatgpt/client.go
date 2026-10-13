@@ -96,15 +96,26 @@ type Page struct {
 }
 type HTTPError struct {
 	Status             int
+	Path               string
+	Challenge          bool
 	PrimaryUnavailable bool
 }
 
+func newHTTPError(resp *http.Response) *HTTPError {
+	return &HTTPError{
+		Status:    resp.StatusCode,
+		Path:      resp.Request.URL.Path,
+		Challenge: resp.StatusCode == http.StatusForbidden && resp.Header.Get("cf-mitigated") == "challenge",
+	}
+}
+
 func (e *HTTPError) Error() string {
+	if e.Challenge {
+		return "ChatGPT's Cloudflare check blocked the bridge; retrying"
+	}
 	switch e.Status {
 	case 401:
 		return "ChatGPT authentication expired; reconnect in Beeper"
-	case 403:
-		return "ChatGPT denied access or requires provider verification; open ChatGPT, then reconnect (no challenge bypass)"
 	case 404:
 		return "ChatGPT returned HTTP 404"
 	case 429:
@@ -186,7 +197,7 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		failure := &HTTPError{Status: resp.StatusCode}
+		failure := newHTTPError(resp)
 		if resp.StatusCode == http.StatusNotFound && req.URL.Path == "/backend-api/tbo/primary" {
 			var body struct {
 				Detail string `json:"detail"`
@@ -226,13 +237,16 @@ func (c *Client) refresh(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("renewing the ChatGPT session: %w", &HTTPError{Status: resp.StatusCode})
+		return fmt.Errorf("renewing the ChatGPT session: %w", newHTTPError(resp))
 	}
 	var session struct {
 		Access  string `json:"accessToken"`
 		Session string `json:"sessionToken"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&session) != nil || session.Access == "" || session.Session == "" {
+	if json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&session) != nil {
+		return errors.New("unexpected ChatGPT session renewal response; retrying")
+	}
+	if session.Access == "" || session.Session == "" {
 		return &HTTPError{Status: 401}
 	}
 	updated := Credentials{AccessToken: session.Access, SessionToken: session.Session}
