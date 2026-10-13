@@ -108,14 +108,28 @@ func (c *Client) LogoutRemote(context.Context) {
 	}
 }
 
-func (c *Client) state(err error) {
+func (c *Client) state(err error) bool {
 	c.connected.Store(false)
-	state := status.StateTransientDisconnect
+	state := status.BridgeState{StateEvent: status.StateTransientDisconnect, Message: err.Error()}
 	var httpErr *chatgpt.HTTPError
-	if errors.As(err, &httpErr) && (httpErr.Status == 401 || httpErr.Status == 403) {
-		state = status.StateBadCredentials
+	if errors.As(err, &httpErr) {
+		c.login.Log.Warn().Err(err).
+			Int("status", httpErr.Status).
+			Str("path", httpErr.Path).
+			Bool("cloudflare_challenge", httpErr.Challenge).
+			Msg("ChatGPT request failed")
+		switch {
+		case httpErr.Status == http.StatusUnauthorized:
+			state.StateEvent = status.StateBadCredentials
+			state.Error = "chatgpt-auth-expired"
+		case httpErr.Challenge:
+			state.Error = "chatgpt-cloudflare-challenge"
+		case httpErr.Status == http.StatusForbidden:
+			state.Error = "chatgpt-forbidden"
+		}
 	}
-	c.login.BridgeState.Send(status.BridgeState{StateEvent: state, Message: err.Error()})
+	c.login.BridgeState.Send(state)
+	return state.StateEvent == status.StateBadCredentials
 }
 func (c *Client) run(ctx context.Context) {
 	defer close(c.done)
@@ -159,8 +173,7 @@ func (c *Client) run(ctx context.Context) {
 		if err == nil {
 			break
 		}
-		c.state(err)
-		if !wait(ctx, delay) {
+		if c.state(err) || !wait(ctx, delay) {
 			return
 		}
 		delay = min(delay*2, time.Minute)
@@ -218,7 +231,9 @@ func (c *Client) run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			c.state(err)
+			if c.state(err) {
+				return
+			}
 			delay = min(delay*2, time.Minute)
 			nextPoll = time.Time{}
 		} else {
