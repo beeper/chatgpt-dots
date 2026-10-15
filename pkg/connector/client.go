@@ -29,7 +29,6 @@ import (
 const (
 	pollInterval          = 3 * time.Second
 	livePollInterval      = 30 * time.Second
-	fullScanInterval      = 30 * time.Minute
 	avatarRefreshInterval = 30 * time.Minute
 )
 
@@ -45,7 +44,6 @@ type Client struct {
 	cancel         context.CancelFunc
 	done           chan struct{}
 	connected      atomic.Bool
-	lastFullScan   time.Time
 	threadMessages map[string]*threadMessage
 	signalWake     chan struct{}
 	signalsLive    atomic.Bool
@@ -133,7 +131,6 @@ func (c *Client) state(err error) bool {
 }
 func (c *Client) run(ctx context.Context) {
 	defer close(c.done)
-	c.lastFullScan = time.Time{}
 	c.signalWake = make(chan struct{}, 1)
 	c.receipts = make(map[string]*receiptState)
 	c.delivered = make(map[string][32]byte)
@@ -463,11 +460,15 @@ func (c *Client) advanceCursor(ctx context.Context, state *RoomState, id string)
 	}
 	return nil
 }
-func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
-	if c.rescan.Swap(false) {
-		c.lastFullScan = time.Time{}
+func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
+	full := c.rescan.Swap(false)
+	if full {
+		defer func() {
+			if err != nil {
+				c.rescan.Store(true)
+			}
+		}()
 	}
-	full := time.Since(c.lastFullScan) >= fullScanInterval
 	for _, state := range c.meta.Rooms {
 		receipt, err := c.readReceipt(ctx, api, state)
 		if err != nil {
@@ -557,9 +558,6 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
 		if err := c.sendReceipt(ctx, state, receipt); err != nil {
 			return err
 		}
-	}
-	if full {
-		c.lastFullScan = time.Now()
 	}
 	return nil
 }
