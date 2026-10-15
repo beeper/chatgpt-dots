@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -69,9 +71,12 @@ var browserHeaders = map[string]string{
 	"Sec-Fetch-Site":     "same-origin",
 }
 
+var cloudflareCookies = []string{"__cf_bm", "__cflb", "_cfuvid", "cf_clearance"}
+
 type egress struct {
 	api       *req.Transport
 	websocket *http.Transport
+	cookies   *cookiejar.Jar
 }
 
 func newEgress(proxy *url.URL) *egress {
@@ -81,7 +86,8 @@ func newEgress(proxy *url.URL) *egress {
 		api.SetProxy(http.ProxyURL(proxy))
 		websocket.Proxy = http.ProxyURL(proxy)
 	}
-	return &egress{api: api.GetTransport(), websocket: websocket}
+	cookies, _ := cookiejar.New(nil)
+	return &egress{api: api.GetTransport(), websocket: websocket, cookies: cookies}
 }
 
 func (e *egress) close() {
@@ -98,9 +104,12 @@ type proxyTransport struct {
 
 func (t *proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	current := t.current.Load()
+	r = r.Clone(r.Context())
+	for _, cookie := range current.cookies.Cookies(r.URL) {
+		r.AddCookie(cookie)
+	}
 	var transport http.RoundTripper = current.websocket
 	if r.Header.Get("Upgrade") == "" {
-		r = r.Clone(r.Context())
 		for key, value := range browserHeaders {
 			if r.Header.Get(key) == "" {
 				r.Header.Set(key, value)
@@ -109,10 +118,20 @@ func (t *proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		transport = current.api
 	}
 	resp, err := transport.RoundTrip(r)
-	if err != nil && r.Context().Err() != context.Canceled {
-		t.failed.Store(true)
+	if err != nil {
+		if r.Context().Err() != context.Canceled {
+			t.failed.Store(true)
+		}
+		return nil, err
 	}
-	return resp, err
+	var keep []*http.Cookie
+	for _, cookie := range resp.Cookies() {
+		if slices.Contains(cloudflareCookies, cookie.Name) {
+			keep = append(keep, cookie)
+		}
+	}
+	current.cookies.SetCookies(r.URL, keep)
+	return resp, nil
 }
 
 func (t *proxyTransport) update(ctx context.Context, reason string) error {
