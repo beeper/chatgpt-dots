@@ -229,6 +229,7 @@ func (c *Client) refresh(ctx context.Context) error {
 	if err != nil {
 		return errors.New("cannot prepare ChatGPT renewal")
 	}
+	req.Header.Set("Authorization", "Bearer "+c.credentials.AccessToken)
 	req.Header.Set("User-Agent", "BeeperDotsBridge/0.1")
 	req.AddCookie(&http.Cookie{Name: "__Secure-next-auth.session-token", Value: c.credentials.SessionToken})
 	resp, err := c.http.Do(req)
