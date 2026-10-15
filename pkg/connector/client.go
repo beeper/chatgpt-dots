@@ -468,6 +468,9 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
 		c.lastFullScan = time.Time{}
 	}
 	full := time.Since(c.lastFullScan) >= fullScanInterval
+	if full {
+		c.lastFullScan = time.Now()
+	}
 	for _, state := range c.meta.Rooms {
 		receipt, err := c.readReceipt(ctx, api, state)
 		if err != nil {
@@ -557,9 +560,6 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) error {
 		if err := c.sendReceipt(ctx, state, receipt); err != nil {
 			return err
 		}
-	}
-	if full {
-		c.lastFullScan = time.Now()
 	}
 	return nil
 }
