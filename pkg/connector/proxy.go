@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/imroc/req/v3"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
 )
@@ -56,45 +57,80 @@ func (c *Connector) getProxy(ctx context.Context, reason string) (string, error)
 	return respData.ProxyURL, nil
 }
 
+var browserHeaders = map[string]string{
+	"Accept":             "*/*",
+	"Accept-Language":    "en-US,en;q=0.9",
+	"Referer":            "https://chatgpt.com/",
+	"Sec-Ch-Ua":          `"Not_A Brand";v="8", "Chromium";v="141", "Google Chrome";v="141"`,
+	"Sec-Ch-Ua-Mobile":   "?0",
+	"Sec-Ch-Ua-Platform": `"Linux"`,
+	"Sec-Fetch-Dest":     "empty",
+	"Sec-Fetch-Mode":     "cors",
+	"Sec-Fetch-Site":     "same-origin",
+}
+
+type egress struct {
+	api       *req.Transport
+	websocket *http.Transport
+}
+
+func newEgress(proxy *url.URL) *egress {
+	api := req.C().ImpersonateChrome()
+	websocket := http.DefaultTransport.(*http.Transport).Clone()
+	if proxy != nil {
+		api.SetProxy(http.ProxyURL(proxy))
+		websocket.Proxy = http.ProxyURL(proxy)
+	}
+	return &egress{api: api.GetTransport(), websocket: websocket}
+}
+
+func (e *egress) close() {
+	e.api.CloseIdleConnections()
+	e.websocket.CloseIdleConnections()
+}
+
 type proxyTransport struct {
 	connector *Connector
 	log       zerolog.Logger
-	current   atomic.Pointer[http.Transport]
+	current   atomic.Pointer[egress]
 	failed    atomic.Bool
 }
 
-func (t *proxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	var transport http.RoundTripper = http.DefaultTransport
-	if current := t.current.Load(); current != nil {
-		transport = current
+func (t *proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	current := t.current.Load()
+	var transport http.RoundTripper = current.websocket
+	if r.Header.Get("Upgrade") == "" {
+		r = r.Clone(r.Context())
+		for key, value := range browserHeaders {
+			if r.Header.Get(key) == "" {
+				r.Header.Set(key, value)
+			}
+		}
+		transport = current.api
 	}
-	resp, err := transport.RoundTrip(req)
-	if err != nil && req.Context().Err() != context.Canceled {
+	resp, err := transport.RoundTrip(r)
+	if err != nil && r.Context().Err() != context.Canceled {
 		t.failed.Store(true)
 	}
 	return resp, err
 }
 
 func (t *proxyTransport) update(ctx context.Context, reason string) error {
-	if !t.connector.hasProxy() {
-		return nil
-	}
 	addr, err := t.connector.getProxy(ctx, reason)
 	if err != nil {
 		return err
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	var proxy *url.URL
 	if addr != "" {
-		parsed, err := url.Parse(addr)
+		proxy, err = url.Parse(addr)
 		if err != nil {
 			return errors.New("invalid proxy address")
 		}
-		transport.Proxy = http.ProxyURL(parsed)
-		t.log.Info().Str("reason", reason).Str("proxy_host", parsed.Host).Msg("Using proxy")
+		t.log.Info().Str("reason", reason).Str("proxy_host", proxy.Host).Msg("Using proxy")
 	}
 	t.failed.Store(false)
-	if old := t.current.Swap(transport); old != nil {
-		old.CloseIdleConnections()
+	if old := t.current.Swap(newEgress(proxy)); old != nil {
+		old.close()
 	}
 	return nil
 }

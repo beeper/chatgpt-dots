@@ -25,7 +25,7 @@ func TestProxyTransportUpdate(t *testing.T) {
 	if reason != "connect" {
 		t.Fatalf("reason = %q, want connect", reason)
 	}
-	got, err := proxy.current.Load().Proxy(httptest.NewRequest(http.MethodGet, "https://chatgpt.com/", nil))
+	got, err := proxy.current.Load().websocket.Proxy(httptest.NewRequest(http.MethodGet, "https://chatgpt.com/", nil))
 	if err != nil || got == nil || got.String() != proxyURL {
 		t.Fatalf("proxy = %v (%v), want %s", got, err, proxyURL)
 	}
@@ -35,7 +35,7 @@ func TestProxyTransportUpdate(t *testing.T) {
 	if err := proxy.update(context.Background(), "connect"); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = proxy.current.Load().Proxy(httptest.NewRequest(http.MethodGet, "https://chatgpt.com/", nil))
+	got, _ = proxy.current.Load().websocket.Proxy(httptest.NewRequest(http.MethodGet, "https://chatgpt.com/", nil))
 	if got != nil && got.String() == previous {
 		t.Fatal("empty proxy_url should stop using the previous proxy")
 	}
