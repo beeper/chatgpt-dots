@@ -14,6 +14,12 @@ type confirmationTransport func(*http.Request) (*http.Response, error)
 
 func (f confirmationTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func testElicitation() *Elicitation {
+	var e Elicitation
+	_ = json.Unmarshal([]byte(`{"request_id":"request","thread_id":"thread","params":{"threadId":"thread","message":"Save rule?","requestedSchema":{"type":"object","properties":{}}}}`), &e)
+	return &e
+}
+
 func TestElicitationWireContract(t *testing.T) {
 	for _, action := range []string{"accept", "decline"} {
 		t.Run(action, func(t *testing.T) {
@@ -39,11 +45,11 @@ func TestElicitationWireContract(t *testing.T) {
 				}
 				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"status":"applied"}`)), Request: r}, nil
 			})}
-			applied, err := c.RespondElicitation(context.Background(), "room", "message", "fresh", action)
+			applied, err := c.RespondElicitation(context.Background(), "room", "message", "fresh", action, testElicitation())
 			if err != nil || !applied || calls != 1 {
 				t.Fatalf("applied=%v err=%v calls=%d", applied, err, calls)
 			}
-			if _, err = c.RespondElicitation(context.Background(), "other", "message", "fresh", action); err == nil || calls != 1 {
+			if _, err = c.RespondElicitation(context.Background(), "other", "message", "fresh", action, testElicitation()); err == nil || calls != 1 {
 				t.Fatal("unverified room reached provider")
 			}
 		})
@@ -61,9 +67,39 @@ func TestElicitationDoesNotRetryOrInferApplied(t *testing.T) {
 			calls++
 			return &http.Response{StatusCode: response.status, Body: io.NopCloser(strings.NewReader(response.body)), Request: r, Header: http.Header{}}, nil
 		})}
-		applied, _ := c.RespondElicitation(context.Background(), "room", "message", "fresh", "accept")
+		applied, _ := c.RespondElicitation(context.Background(), "room", "message", "fresh", "accept", testElicitation())
 		if applied || calls != 1 {
 			t.Fatalf("status=%d body=%s applied=%v calls=%d", response.status, response.body, applied, calls)
+		}
+	}
+}
+
+func TestBooleanConfirmationWireContract(t *testing.T) {
+	e := testElicitation()
+	e.Params.Schema = json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"confirmed":{"type":"boolean","title":"Save this rule","default":true}},"required":["confirmed"]}`)
+	e.Params.Meta = json.RawMessage(`{"openai/confirmation":{"version":1,"field":"confirmed","presentation":{"title":"Confirm custom rule"}}}`)
+	if !e.Binary() {
+		t.Fatal("native boolean confirmation was rejected")
+	}
+	c := &Client{rooms: map[string]bool{"room": true}}
+	c.http = &http.Client{Transport: confirmationTransport(func(r *http.Request) (*http.Response, error) {
+		var body struct {
+			Result struct {
+				Content map[string]any `json:"content"`
+			} `json:"result"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil || len(body.Result.Content) != 1 || body.Result.Content["confirmed"] != true {
+			t.Fatal("boolean approval was not included")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"status":"applied"}`)), Request: r}, nil
+	})}
+	if ok, err := c.RespondElicitation(context.Background(), "room", "message", "fresh", "accept", e); !ok || err != nil {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	for _, meta := range []string{`{"openai/confirmation":{"version":2,"field":"confirmed"}}`, `{"openai/confirmation":{"version":1,"field":"different"}}`} {
+		e.Params.Meta = json.RawMessage(meta)
+		if e.Binary() {
+			t.Fatal("unsupported confirmation offered approval")
 		}
 	}
 }

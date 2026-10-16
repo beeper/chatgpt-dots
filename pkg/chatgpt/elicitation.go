@@ -35,19 +35,24 @@ func (e *Elicitation) Valid() bool {
 
 // Binary confirmations need no form data. Other requests must stay in the native UI.
 func (e *Elicitation) Binary() bool {
+	_, ok := e.AcceptContent()
+	return ok
+}
+
+func (e *Elicitation) AcceptContent() (map[string]any, bool) {
 	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" {
-		return false
+		return nil, false
 	}
 	if e.Params.Server == "browser" || e.Params.Server == "browser-use" {
-		return false
+		return nil, false
 	}
 	var meta map[string]json.RawMessage
 	if len(e.Params.Meta) != 0 && json.Unmarshal(e.Params.Meta, &meta) != nil {
-		return false
+		return nil, false
 	}
 	for key := range meta {
 		if key != "reason" && key != "openai/confirmation" {
-			return false
+			return nil, false
 		}
 	}
 	var schema struct {
@@ -55,7 +60,29 @@ func (e *Elicitation) Binary() bool {
 		Properties map[string]json.RawMessage `json:"properties"`
 		Required   []string                   `json:"required"`
 	}
-	return json.Unmarshal(e.Params.Schema, &schema) == nil && schema.Type == "object" && schema.Properties != nil && len(schema.Properties) == 0 && len(schema.Required) == 0
+	if json.Unmarshal(e.Params.Schema, &schema) != nil || schema.Type != "object" || schema.Properties == nil {
+		return nil, false
+	}
+	if len(schema.Properties) == 0 && len(schema.Required) == 0 {
+		return map[string]any{}, true
+	}
+	var confirmation struct {
+		Version int    `json:"version"`
+		Field   string `json:"field"`
+	}
+	if json.Unmarshal(meta["openai/confirmation"], &confirmation) != nil || confirmation.Version != 1 || confirmation.Field == "" || len(schema.Properties) != 1 || len(schema.Required) != 1 || schema.Required[0] != confirmation.Field {
+		return nil, false
+	}
+	var field map[string]json.RawMessage
+	if json.Unmarshal(schema.Properties[confirmation.Field], &field) != nil || string(field["type"]) != `"boolean"` {
+		return nil, false
+	}
+	for key := range field {
+		if key != "type" && key != "title" && key != "description" && key != "default" {
+			return nil, false
+		}
+	}
+	return map[string]any{confirmation.Field: true}, true
 }
 
 func (e *Elicitation) Summary() string {
@@ -64,10 +91,28 @@ func (e *Elicitation) Summary() string {
 	}
 	text := e.Params.Message
 	var meta struct {
-		Reason string `json:"reason"`
+		Reason       string          `json:"reason"`
+		Confirmation json.RawMessage `json:"openai/confirmation"`
 	}
-	if json.Unmarshal(e.Params.Meta, &meta) == nil && strings.TrimSpace(meta.Reason) != "" && meta.Reason != text {
-		text += "\n\n" + meta.Reason
+	var confirmation struct {
+		Presentation struct {
+			Title  string `json:"title"`
+			Fields []struct {
+				Label string `json:"label"`
+				Value string `json:"value"`
+			} `json:"fields"`
+		} `json:"presentation"`
+	}
+	if json.Unmarshal(e.Params.Meta, &meta) == nil {
+		_ = json.Unmarshal(meta.Confirmation, &confirmation)
+		if strings.TrimSpace(meta.Reason) != "" && !strings.Contains(text, meta.Reason) {
+			text += "\n\n" + meta.Reason
+		}
+		for _, field := range confirmation.Presentation.Fields {
+			if strings.TrimSpace(field.Value) != "" && !strings.Contains(text, field.Value) {
+				text += "\n\n" + field.Label + " " + field.Value
+			}
+		}
 	}
 	return text
 }
@@ -124,7 +169,7 @@ func (c *Client) ReadElicitation(ctx context.Context, room, message string) (*El
 	return &state, nil
 }
 
-func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerprint, action string) (bool, error) {
+func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerprint, action string, elicitation *Elicitation) (bool, error) {
 	path, err := c.elicitationPath(room, message)
 	if err != nil {
 		return false, err
@@ -142,7 +187,11 @@ func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerpr
 	}{Fingerprint: fingerprint}
 	body.Result.Action = action
 	if action == "accept" {
-		body.Result.Content = map[string]any{}
+		var ok bool
+		body.Result.Content, ok = elicitation.AcceptContent()
+		if !ok {
+			return false, errors.New("confirmation needs the ChatGPT interface")
+		}
 	}
 	var response struct {
 		Status string `json:"status"`

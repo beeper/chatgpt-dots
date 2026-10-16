@@ -24,9 +24,11 @@ ordinary quoted replies, voice notes and sending reactions, typing or read recei
 not supported. Some native message formats remain unsupported. See the
 [setup guide](docs/README.md) to run a standalone instance.
 
-When a Dot asks for confirmation, reply to that card with `!dots accept` or
-`!dots decline`. `!dots check` reads its current status. Ordinary replies such
-as “Yes” stay chat messages. Requests that need form fields, sign-in, location
+When a Dot asks for confirmation, the card includes a command such as
+`!dots accept a1b2c3d4e5f6`. Send that command in the chat to accept, or use
+`!dots decline a1b2c3d4e5f6` to decline. `!dots check a1b2c3d4e5f6` reads its
+status. No quoted reply is needed. Ordinary messages such as “Yes” stay chat
+messages. Requests that need other form fields, sign-in, location
 or verification direct you to ChatGPT. A decision with an uncertain outcome
 is never automatically submitted again, including after a restart.
 

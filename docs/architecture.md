@@ -61,11 +61,13 @@ These signals are incoming-only.
 ## Confirmations
 
 Native `content.elicitation` requests remain attached to their original message.
-The standard BridgeV2 command processor handles `!dots accept`, `!dots decline`
-and `!dots check` as replies to that message. Before submitting a decision the
+The standard BridgeV2 command processor handles `!dots accept <code>`, `!dots decline <code>`
+and `!dots check <code>` in the chat without requiring quoted replies. The code
+binds the request definition to its persisted message in that account and room.
+Before submitting a decision the
 connector verifies the account, room members, original Dot sender, request
 definition and provider's current request fingerprint. Only confirmations
-without form fields or special authentication/verification requirements can be
+with no form fields or one native confirmation checkbox can be
 answered from Beeper; other requests link to the native ChatGPT interface.
 
 The login metadata reserves the decision before submission. Only a provider

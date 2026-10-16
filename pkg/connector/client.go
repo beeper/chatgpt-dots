@@ -411,7 +411,7 @@ func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomF
 		"m.audio":         {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
 		"m.video":         {MimeTypes: map[string]event.CapabilitySupportLevel{"video/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		event.CapMsgVoice: {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
-	}, Reply: event.CapLevelPartialSupport, Thread: event.CapLevelRejected, Edit: event.CapLevelRejected, Delete: event.CapLevelRejected, Reaction: event.CapLevelRejected, Poll: event.CapLevelRejected, LocationMessage: event.CapLevelRejected}
+	}, Reply: event.CapLevelRejected, Thread: event.CapLevelRejected, Edit: event.CapLevelRejected, Delete: event.CapLevelRejected, Reaction: event.CapLevelRejected, Poll: event.CapLevelRejected, LocationMessage: event.CapLevelRejected}
 }
 func revision(m chatgpt.Message) string {
 	return messageRevision(m, false)
@@ -434,6 +434,7 @@ func messageRevision(m chatgpt.Message, includeUpdateTime bool) string {
 	if m.Content.Elicitation != nil {
 		confirmation, _ := json.Marshal(m.Content.Elicitation)
 		encoded = append(append(encoded, '\x00'), confirmation...)
+		encoded = append(encoded, byte(confirmationRenderingVersion))
 	}
 	updated := ""
 	if includeUpdateTime {
@@ -465,7 +466,7 @@ func (c *Client) advanceCursor(ctx context.Context, state *RoomState, id string)
 	return nil
 }
 func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
-	full := c.rescan.Swap(false) || !c.meta.ConfirmationsSynced
+	full := c.rescan.Swap(false) || !c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion
 	if full {
 		defer func() {
 			if err != nil {
@@ -563,12 +564,14 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			return err
 		}
 	}
-	if full && !c.meta.ConfirmationsSynced {
+	if full && (!c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion) {
 		c.mu.Lock()
+		oldSynced, oldVersion := c.meta.ConfirmationsSynced, c.meta.ConfirmationVersion
 		c.meta.ConfirmationsSynced = true
+		c.meta.ConfirmationVersion = confirmationRenderingVersion
 		err = c.login.Save(ctx)
 		if err != nil {
-			c.meta.ConfirmationsSynced = false
+			c.meta.ConfirmationsSynced, c.meta.ConfirmationVersion = oldSynced, oldVersion
 		}
 		c.mu.Unlock()
 		if err != nil {

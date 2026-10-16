@@ -114,7 +114,27 @@ func TestConfirmationCommandPersistenceAndOwnership(t *testing.T) {
 			if _, _, err = connector.runConfirmationCommand(ce); err == nil || posts != 0 {
 				t.Fatal("unquoted command reached provider submission")
 			}
-			ce.ReplyTo = target.MXID
+			ce.RawArgs = "not-a-code"
+			if _, _, err = connector.runConfirmationCommand(ce); err == nil || posts != 0 {
+				t.Fatal("invalid code reached provider submission")
+			}
+			ce.RawArgs = m.Content.Elicitation.Definition()[:12]
+			attachment := *target
+			attachment.PartID, attachment.MXID = "attachment", "$attachment"
+			if err = br.DB.Message.Insert(ctx, &attachment); err != nil {
+				t.Fatal(err)
+			}
+			collision := *target
+			collision.ID, collision.MXID = "other-card", "$other-card"
+			if err = br.DB.Message.Insert(ctx, &collision); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err = connector.runConfirmationCommand(ce); err == nil || posts != 0 {
+				t.Fatal("ambiguous code reached provider submission")
+			}
+			if err = br.DB.Message.Delete(ctx, collision.RowID); err != nil {
+				t.Fatal(err)
+			}
 			_, uncertain, err := connector.runConfirmationCommand(ce)
 			if posts != 1 || (outcome == "applied") != (err == nil) || uncertain != (outcome != "applied") {
 				t.Fatalf("posts=%d uncertain=%v err=%v", posts, uncertain, err)
