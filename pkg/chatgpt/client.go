@@ -71,6 +71,7 @@ type Message struct {
 	Content   struct {
 		Text        string            `json:"text"`
 		Attachments []json.RawMessage `json:"attachments"`
+		Elicitation *Elicitation      `json:"elicitation,omitempty"`
 	} `json:"content"`
 }
 type Room struct {
