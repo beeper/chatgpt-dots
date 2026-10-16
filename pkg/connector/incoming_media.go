@@ -97,7 +97,7 @@ func expectedIncomingParts(m chatgpt.Message, existing []*database.Message) map[
 	if m.Deleted != nil {
 		parts["deleted"] = true
 	} else if len(attachments) == 0 {
-		if m.Content.Text != "" {
+		if m.Content.Text != "" || m.Content.Elicitation != nil {
 			parts[textPartID(m, existing)] = true
 		}
 	} else {
@@ -133,19 +133,24 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 	}
 	result := &bridgev2.ConvertedMessage{}
 	attachments := mappedAttachments(m, existing)
-	if m.Deleted == nil && m.Content.Text == "" && len(attachments) == 0 {
+	if m.Deleted == nil && m.Content.Text == "" && m.Content.Elicitation == nil && len(attachments) == 0 {
 		return result, nil
 	}
 	add := func(id networkid.PartID, content *event.MessageEventContent, thread *chatgpt.ThreadStatus) {
-		result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Revision: revisions[id], Thread: thread, TextAnchor: len(attachments) == 0 && m.Deleted == nil, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}})
+		confirmation := ""
+		if m.Deleted == nil && m.Sender == state.DotMember {
+			confirmation = m.Content.Elicitation.Definition()
+		}
+		result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Confirmation: confirmation, Revision: revisions[id], Thread: thread, TextAnchor: len(attachments) == 0 && m.Deleted == nil, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}})
 	}
+	text := confirmationText(m, c.connector.bridge.Config.CommandPrefix)
 	if m.Deleted != nil || len(attachments) == 0 {
 		partID := textPartID(m, existing)
 		if m.Deleted != nil {
 			partID = "deleted"
 		}
 		if !current[partID] {
-			content := renderText(m.Content.Text)
+			content := renderText(text)
 			if m.Deleted != nil {
 				content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "[Message deleted in ChatGPT]"}
 			}
@@ -179,8 +184,8 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			thread = m.Threads[attachment.ThreadID]
 			content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: threadBody(thread)}
 		}
-		if i == 0 && m.Content.Text != "" {
-			applyCaption(content, m.Content.Text)
+		if i == 0 && text != "" {
+			applyCaption(content, text)
 		}
 		add(attachment.PartID, content, thread)
 	}

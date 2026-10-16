@@ -20,13 +20,15 @@ import (
 )
 
 type LoginMetadata struct {
-	CredentialRef  string                 `json:"credential_ref,omitempty"`
-	Credentials    *chatgpt.Credentials   `json:"credentials,omitempty"`
-	Account        string                 `json:"account"`
-	User           string                 `json:"user"`
-	Rooms          map[string]*RoomState  `json:"rooms"`
-	Pending        map[string]PendingSend `json:"pending,omitempty"`
-	SelfAvatarHash string                 `json:"self_avatar_hash,omitempty"`
+	CredentialRef       string                        `json:"credential_ref,omitempty"`
+	Credentials         *chatgpt.Credentials          `json:"credentials,omitempty"`
+	Account             string                        `json:"account"`
+	User                string                        `json:"user"`
+	Rooms               map[string]*RoomState         `json:"rooms"`
+	Pending             map[string]PendingSend        `json:"pending,omitempty"`
+	Confirmations       map[string]ConfirmationAction `json:"confirmations,omitempty"`
+	ConfirmationsSynced bool                          `json:"confirmations_synced,omitempty"`
+	SelfAvatarHash      string                        `json:"self_avatar_hash,omitempty"`
 }
 type PendingSend struct {
 	// Missing in older records means delivery may have happened.
@@ -51,6 +53,7 @@ type RoomState struct {
 	Overlap     []string         `json:"overlap"`
 }
 type MessageMetadata struct {
+	Confirmation  string                `json:"confirmation,omitempty"`
 	OutgoingMedia bool                  `json:"outgoing_media,omitempty"`
 	TextAnchor    bool                  `json:"text_anchor,omitempty"`
 	Revision      string                `json:"revision"`
@@ -206,6 +209,11 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 		for id, pending := range existing.Pending {
 			meta.Pending[id] = pending
 		}
+		meta.Confirmations = make(map[string]ConfirmationAction, len(existing.Confirmations))
+		for id, action := range existing.Confirmations {
+			meta.Confirmations[id] = action
+		}
+		meta.ConfirmationsSynced = existing.ConfirmationsSynced
 	}
 	if len(meta.Rooms) > 1 || (len(meta.Rooms) == 1 && meta.Rooms[profiles[0].Room] == nil) {
 		return nil, errors.New("the primary Dot differs from this connection; keeping the original Dot and message mappings")

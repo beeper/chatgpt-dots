@@ -51,11 +51,11 @@ func (c *Connector) Start(context.Context) error {
 	if !c.bridge.Config.SplitPortals || c.bridge.Config.AsyncEvents || c.bridge.Config.PortalEventBuffer != 0 {
 		return errors.New("ChatGPT Dots requires split portals and synchronous, unbuffered portal events")
 	}
-	return nil
+	return c.registerConfirmationCommands()
 }
 
 func (c *Connector) GetName() bridgev2.BridgeName {
-	return bridgev2.BridgeName{DisplayName: "ChatGPT Dots", NetworkURL: "https://chatgpt.com", NetworkID: "chatgpt-dots", BeeperBridgeType: "chatgpt-dots", DefaultPort: 29349}
+	return bridgev2.BridgeName{DisplayName: "ChatGPT Dots", NetworkURL: "https://chatgpt.com", NetworkID: "chatgpt-dots", BeeperBridgeType: "chatgpt-dots", DefaultPort: 29349, DefaultCommandPrefix: "!dots"}
 }
 func (c *Connector) GetDBMetaTypes() database.MetaTypes {
 	return database.MetaTypes{UserLogin: func() any { return &LoginMetadata{} }, Message: func() any { return &MessageMetadata{} }}
@@ -63,7 +63,7 @@ func (c *Connector) GetDBMetaTypes() database.MetaTypes {
 func (c *Connector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 	return &bridgev2.NetworkGeneralCapabilities{}
 }
-func (c *Connector) GetBridgeInfoVersion() (int, int) { return 2, 4 }
+func (c *Connector) GetBridgeInfoVersion() (int, int) { return 2, 5 }
 func (c *Connector) GetConfig() (string, any, configupgrade.Upgrader) {
 	return ExampleConfig, &c.Config, configupgrade.SimpleUpgrader(func(helper configupgrade.Helper) {
 		helper.Copy(configupgrade.Str|configupgrade.Null, "proxy")

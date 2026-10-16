@@ -405,13 +405,13 @@ func (c *Client) GetUserInfo(_ context.Context, g *bridgev2.Ghost) (*bridgev2.Us
 	return nil, errors.New("unknown Dot contact")
 }
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
-	return &event.RoomFeatures{ID: "chatgpt-dots.signals.v1", ReadReceipts: true, TypingNotifications: true, File: event.FileFeatureMap{
+	return &event.RoomFeatures{ID: "chatgpt-dots.confirmations.v1", ReadReceipts: true, TypingNotifications: true, File: event.FileFeatureMap{
 		"m.image":         {MimeTypes: map[string]event.CapabilitySupportLevel{"image/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.file":          {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.audio":         {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
 		"m.video":         {MimeTypes: map[string]event.CapabilitySupportLevel{"video/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		event.CapMsgVoice: {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
-	}, Reply: event.CapLevelRejected, Thread: event.CapLevelRejected, Edit: event.CapLevelRejected, Delete: event.CapLevelRejected, Reaction: event.CapLevelRejected, Poll: event.CapLevelRejected, LocationMessage: event.CapLevelRejected}
+	}, Reply: event.CapLevelPartialSupport, Thread: event.CapLevelRejected, Edit: event.CapLevelRejected, Delete: event.CapLevelRejected, Reaction: event.CapLevelRejected, Poll: event.CapLevelRejected, LocationMessage: event.CapLevelRejected}
 }
 func revision(m chatgpt.Message) string {
 	return messageRevision(m, false)
@@ -431,6 +431,10 @@ func messageRevision(m chatgpt.Message, includeUpdateTime bool) string {
 		}
 	}
 	encoded, _ := json.Marshal(attachments)
+	if m.Content.Elicitation != nil {
+		confirmation, _ := json.Marshal(m.Content.Elicitation)
+		encoded = append(append(encoded, '\x00'), confirmation...)
+	}
 	updated := ""
 	if includeUpdateTime {
 		updated = m.Updated.Format(time.RFC3339Nano)
@@ -461,7 +465,7 @@ func (c *Client) advanceCursor(ctx context.Context, state *RoomState, id string)
 	return nil
 }
 func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
-	full := c.rescan.Swap(false)
+	full := c.rescan.Swap(false) || !c.meta.ConfirmationsSynced
 	if full {
 		defer func() {
 			if err != nil {
@@ -556,6 +560,18 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			after = next
 		}
 		if err := c.sendReceipt(ctx, state, receipt); err != nil {
+			return err
+		}
+	}
+	if full && !c.meta.ConfirmationsSynced {
+		c.mu.Lock()
+		c.meta.ConfirmationsSynced = true
+		err = c.login.Save(ctx)
+		if err != nil {
+			c.meta.ConfirmationsSynced = false
+		}
+		c.mu.Unlock()
+		if err != nil {
 			return err
 		}
 	}

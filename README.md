@@ -13,15 +13,22 @@ protocol can interrupt the connection.
 - Text messages, including incoming Markdown formatting.
 - Images, files and videos in both directions, with a bridge-local 20 MiB limit.
 - Task cards whose titles and status update in place.
+- Confirmation cards with explicit accept, decline and status commands.
 - Incoming Dot emoji reactions, typing indicators and read receipts.
 - Separate Dot and account avatars, account profile refresh and session renewal.
 - Recovery of messages received after linking, including across restarts.
 
 The bridge connects one existing primary Dot in a personal account. It does not
 import regular ChatGPT conversations or pre-link history. Groups, creating Dots,
-quoted replies, voice notes and sending reactions, typing or read receipts are
+ordinary quoted replies, voice notes and sending reactions, typing or read receipts are
 not supported. Some native message formats remain unsupported. See the
 [setup guide](docs/README.md) to run a standalone instance.
+
+When a Dot asks for confirmation, reply to that card with `!dots accept` or
+`!dots decline`. `!dots check` reads its current status. Ordinary replies such
+as “Yes” stay chat messages. Requests that need form fields, sign-in, location
+or verification direct you to ChatGPT. A decision with an uncertain outcome
+is never automatically submitted again, including after a restart.
 
 ## Build
 
