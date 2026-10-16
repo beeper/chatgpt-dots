@@ -10,6 +10,7 @@ import (
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
@@ -19,6 +20,8 @@ type ConfirmationAction struct {
 	Action  string     `json:"action"`
 	Applied bool       `json:"applied"`
 }
+
+const confirmationRenderingVersion = 2
 
 func confirmationText(m chatgpt.Message, prefix string) string {
 	e := m.Content.Elicitation
@@ -41,7 +44,8 @@ func confirmationText(m chatgpt.Message, prefix string) string {
 	if !e.Binary() {
 		return text + "This request needs the ChatGPT interface: https://chatgpt.com/dots/home"
 	}
-	return text + fmt.Sprintf("Reply to this message with `%s accept` to accept or `%s decline` to decline. Use `%s check` to check its status. A normal chat reply does not answer this confirmation.", prefix, prefix, prefix)
+	code := e.Definition()[:12]
+	return text + fmt.Sprintf("To accept, send `%s accept %s` in this chat. To decline, send `%s decline %s`. Check status with `%s check %s`. You do not need to reply to this message.", prefix, code, prefix, code, prefix, code)
 }
 
 func (c *Connector) registerConfirmationCommands() error {
@@ -51,7 +55,7 @@ func (c *Connector) registerConfirmationCommands() error {
 	}
 	for _, name := range []string{"accept", "decline", "check"} {
 		processor.AddHandlers(&commands.FullHandler{Name: name, RequiresPortal: true, RequiresLogin: true,
-			Help: commands.HelpMeta{Section: commands.HelpSectionMisc, Description: "Reply to a Dot confirmation to " + name + " it."}, Func: c.handleConfirmationCommand})
+			Help: commands.HelpMeta{Section: commands.HelpSectionMisc, Args: "<confirmation code>", Description: "Use the code on a Dot confirmation to " + name + " it."}, Func: c.handleConfirmationCommand})
 	}
 	return nil
 }
@@ -61,7 +65,7 @@ func (c *Connector) handleConfirmationCommand(ce *commands.Event) {
 	if err != nil {
 		message = err.Error()
 		if uncertain {
-			message = "ChatGPT has not confirmed this decision. It will not be sent again automatically. Reply to the original confirmation with " + c.bridge.Config.CommandPrefix + " check, or check it in ChatGPT."
+			message = "ChatGPT has not confirmed this decision. It will not be sent again automatically. Use the check command shown on the original confirmation, or check it in ChatGPT."
 		}
 		*ce.MessageStatus = bridgev2.WrapErrorInStatus(errors.New(message)).WithMessage(message).WithIsCertain(!uncertain).WithSendNotice(false).WithStatus(event.MessageStatusFail)
 	}
@@ -69,8 +73,8 @@ func (c *Connector) handleConfirmationCommand(ce *commands.Event) {
 }
 
 func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, error) {
-	if ce.Sudo || ce.User == nil || ce.Portal == nil || ce.EventID == "" || ce.ReplyTo == "" || ce.OrigRoomID != ce.RoomID || ce.RoomID != ce.Portal.MXID || strings.TrimSpace(ce.RawArgs) != "" {
-		return "", false, errors.New("Reply to the original Dot confirmation in this conversation, with no extra arguments")
+	if ce.Sudo || ce.User == nil || ce.Portal == nil || ce.EventID == "" || ce.OrigRoomID != ce.RoomID || ce.RoomID != ce.Portal.MXID {
+		return "", false, errors.New("Use the confirmation command shown on the card in this conversation")
 	}
 	login, err := c.bridge.GetExistingUserLoginByID(ce.Ctx, ce.Portal.Receiver)
 	if err != nil || login == nil || login.UserMXID != ce.User.MXID {
@@ -93,9 +97,9 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	defer cancel()
 	stop := context.AfterFunc(run, cancel)
 	defer stop()
-	target, err := c.bridge.DB.Message.GetPartByMXID(ctx, ce.ReplyTo)
-	if err != nil || target == nil || target.Room != client.key(room) || target.MXID != ce.ReplyTo || target.SenderID != client.dotID(room) || target.HasFakeMXID() {
-		return "", false, errors.New("Reply to the original Dot confirmation in this conversation")
+	target, err := c.confirmationTarget(ctx, ce)
+	if err != nil || target == nil || target.Room != client.key(room) || target.SenderID != client.dotID(room) || target.HasFakeMXID() {
+		return "", false, errors.New("Use the exact confirmation command shown on the card in this conversation")
 	}
 	metadata, ok := target.Metadata.(*MessageMetadata)
 	if !ok || metadata.Confirmation == "" {
@@ -163,7 +167,7 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	if err != nil {
 		return "", false, errors.New("Could not save the confirmation decision; nothing submitted")
 	}
-	applied, err := api.RespondElicitation(ctx, room.Profile.Room, string(target.ID), observed.Fingerprint, ce.Command)
+	applied, err := api.RespondElicitation(ctx, room.Profile.Room, string(target.ID), observed.Fingerprint, ce.Command, observed.Elicitation)
 	if err != nil || !applied {
 		return "", true, errors.New("ChatGPT did not confirm this decision")
 	}
@@ -185,4 +189,34 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	default:
 	}
 	return "ChatGPT confirmed this decision: " + ce.Command + ".", false, nil
+}
+
+func (c *Connector) confirmationTarget(ctx context.Context, ce *commands.Event) (*database.Message, error) {
+	code := strings.TrimSpace(ce.RawArgs)
+	if code == "" && ce.ReplyTo != "" {
+		return c.bridge.DB.Message.GetPartByMXID(ctx, ce.ReplyTo)
+	}
+	if ce.ReplyTo != "" || len(code) != 12 || strings.Trim(code, "0123456789abcdef") != "" {
+		return nil, errors.New("invalid confirmation code")
+	}
+	rows, err := c.bridge.DB.Message.GetDB().Query(ctx, `SELECT MIN(rowid) FROM message WHERE bridge_id=$1 AND room_id=$2 AND room_receiver=$3 AND metadata->>'confirmation' LIKE $4 GROUP BY id LIMIT 2`, c.bridge.ID, ce.Portal.ID, ce.Portal.Receiver, code+"%")
+	if err != nil {
+		return nil, err
+	}
+	var rowIDs []int64
+	for rows.Next() {
+		var rowID int64
+		if err = rows.Scan(&rowID); err != nil {
+			break
+		}
+		rowIDs = append(rowIDs, rowID)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	if err != nil || len(rowIDs) != 1 {
+		return nil, errors.New("confirmation code is missing or ambiguous")
+	}
+	return c.bridge.DB.Message.GetByRowID(ctx, rowIDs[0])
 }

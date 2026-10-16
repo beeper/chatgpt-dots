@@ -28,6 +28,7 @@ type LoginMetadata struct {
 	Pending             map[string]PendingSend        `json:"pending,omitempty"`
 	Confirmations       map[string]ConfirmationAction `json:"confirmations,omitempty"`
 	ConfirmationsSynced bool                          `json:"confirmations_synced,omitempty"`
+	ConfirmationVersion int                           `json:"confirmation_version,omitempty"`
 	SelfAvatarHash      string                        `json:"self_avatar_hash,omitempty"`
 }
 type PendingSend struct {
@@ -214,6 +215,7 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 			meta.Confirmations[id] = action
 		}
 		meta.ConfirmationsSynced = existing.ConfirmationsSynced
+		meta.ConfirmationVersion = existing.ConfirmationVersion
 	}
 	if len(meta.Rooms) > 1 || (len(meta.Rooms) == 1 && meta.Rooms[profiles[0].Room] == nil) {
 		return nil, errors.New("the primary Dot differs from this connection; keeping the original Dot and message mappings")

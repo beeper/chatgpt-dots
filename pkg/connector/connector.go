@@ -63,7 +63,7 @@ func (c *Connector) GetDBMetaTypes() database.MetaTypes {
 func (c *Connector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 	return &bridgev2.NetworkGeneralCapabilities{}
 }
-func (c *Connector) GetBridgeInfoVersion() (int, int) { return 2, 5 }
+func (c *Connector) GetBridgeInfoVersion() (int, int) { return 2, 6 }
 func (c *Connector) GetConfig() (string, any, configupgrade.Upgrader) {
 	return ExampleConfig, &c.Config, configupgrade.SimpleUpgrader(func(helper configupgrade.Helper) {
 		helper.Copy(configupgrade.Str|configupgrade.Null, "proxy")
