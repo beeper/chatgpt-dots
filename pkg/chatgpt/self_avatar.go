@@ -67,8 +67,15 @@ func (c *Client) SelfAvatar(ctx context.Context, profile Profile) ([]byte, error
 	}
 	req.Header.Set("User-Agent", "BeeperDotsBridge/0.1")
 	client := *c.http
+	var redirectErr error
 	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
-		if len(via) >= 3 || !selfAvatarOrigin(next.URL) {
+		next.Header.Del("Referer")
+		if len(via) > 3 {
+			redirectErr = errors.New("own avatar exceeded three redirects")
+		} else if !selfAvatarOrigin(next.URL) {
+			redirectErr = fmt.Errorf("own avatar redirect uses an unsupported storage origin %s://%s", next.URL.Scheme, next.URL.Host)
+		}
+		if redirectErr != nil {
 			return http.ErrUseLastResponse
 		}
 		return nil
@@ -78,6 +85,9 @@ func (c *Client) SelfAvatar(ctx context.Context, profile Profile) ([]byte, error
 		return nil, errors.New("own avatar download failed")
 	}
 	defer resp.Body.Close()
+	if redirectErr != nil {
+		return nil, redirectErr
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, errors.New("own avatar storage denied the download")
 	}
@@ -97,5 +107,5 @@ func selfAvatarOrigin(u *url.URL) bool {
 		return false
 	}
 	host := u.Hostname()
-	return strings.HasSuffix(host, ".oaiusercontent.com") || host == "cdn.openai.com" || strings.HasSuffix(host, ".oaistatic.com") || host == "cdn.auth0.com" || host == "gravatar.com" || strings.HasSuffix(host, ".gravatar.com") || strings.HasSuffix(host, ".googleusercontent.com")
+	return strings.HasSuffix(host, ".oaiusercontent.com") || host == "cdn.openai.com" || strings.HasSuffix(host, ".oaistatic.com") || host == "cdn.auth0.com" || host == "gravatar.com" || strings.HasSuffix(host, ".gravatar.com") || host == "lh3.googleusercontent.com"
 }

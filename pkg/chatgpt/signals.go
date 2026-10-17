@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -82,7 +81,7 @@ func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) e
 	if err != nil {
 		return errors.New("invalid ChatGPT messaging socket URL")
 	}
-	if u.Scheme != "wss" || u.User != nil || u.Port() != "" || !(u.Hostname() == "chatgpt.com" || strings.HasSuffix(u.Hostname(), ".chatgpt.com")) {
+	if u.Scheme != "wss" || u.User != nil || u.Host != "ws.chatgpt.com" {
 		return fmt.Errorf("unexpected ChatGPT messaging socket origin %s://%s", u.Scheme, u.Host)
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
