@@ -21,8 +21,8 @@ redaction does not make all logs safe to share. Avoid HTTP payload tracing.
 
 Media downloads use allowlisted origins and send no ChatGPT credentials to
 storage hosts. Own-account avatars may follow up to three redirects, with the
-same origin allowlist checked at every hop and no Referer forwarded. Other media
-downloads reject redirects.
+same origin allowlist checked at every hop and no avatar URL forwarded as Referer.
+Other media downloads reject redirects.
 
 ## Reporting a vulnerability
 
