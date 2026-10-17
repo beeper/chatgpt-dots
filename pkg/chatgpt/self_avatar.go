@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"io"
 	"net/http"
@@ -54,15 +55,25 @@ func (c *Client) SelfAvatar(ctx context.Context, profile Profile) ([]byte, error
 		return nil, nil
 	}
 	u, err := url.Parse(avatarURL)
-	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || !(strings.HasSuffix(u.Hostname(), ".oaiusercontent.com") || u.Hostname() == "cdn.openai.com" || strings.HasSuffix(u.Hostname(), ".oaistatic.com") || u.Hostname() == "cdn.auth0.com") {
-		return nil, errors.New("own avatar uses an unsupported storage origin")
+	if err != nil {
+		return nil, errors.New("invalid own avatar URL")
+	}
+	if !selfAvatarOrigin(u) {
+		return nil, fmt.Errorf("own avatar uses an unsupported storage origin %s://%s", u.Scheme, u.Host)
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if err != nil {
 		return nil, errors.New("invalid own avatar request")
 	}
 	req.Header.Set("User-Agent", "BeeperDotsBridge/0.1")
-	resp, err := c.http.Do(req)
+	client := *c.http
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if len(via) >= 3 || !selfAvatarOrigin(next.URL) {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New("own avatar download failed")
 	}
@@ -79,4 +90,12 @@ func (c *Client) SelfAvatar(ctx context.Context, profile Profile) ([]byte, error
 		return nil, errors.New("own avatar must be a supported raster image no larger than 4096 pixels")
 	}
 	return data, nil
+}
+
+func selfAvatarOrigin(u *url.URL) bool {
+	if u.Scheme != "https" || u.User != nil || u.Port() != "" {
+		return false
+	}
+	host := u.Hostname()
+	return strings.HasSuffix(host, ".oaiusercontent.com") || host == "cdn.openai.com" || strings.HasSuffix(host, ".oaistatic.com") || host == "cdn.auth0.com" || host == "gravatar.com" || strings.HasSuffix(host, ".gravatar.com") || strings.HasSuffix(host, ".googleusercontent.com")
 }

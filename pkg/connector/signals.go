@@ -160,10 +160,7 @@ func (c *Client) sendReceipt(ctx context.Context, state *RoomState, receipt *rec
 	evt := &simplevent.Receipt{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventReadReceipt, PortalKey: c.key(state), Sender: bridgev2.EventSender{Sender: c.dotID(state)}, Timestamp: receipt.Native.Updated}, ReadUpTo: receipt.Native.ReadAt}
 	evt.MutateContextFunc = func(context.Context) context.Context { return ctx }
 	result := c.login.QueueRemoteEvent(evt)
-	if result.Ignored {
-		return nil
-	}
-	if !result.Success {
+	if !result.Success && !result.Ignored {
 		return errors.New("could not bridge Dot read receipt")
 	}
 	receipt.SentReadAt, receipt.SentTime = receipt.Native.ReadAt, receipt.Native.Updated
