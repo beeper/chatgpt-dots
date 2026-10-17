@@ -107,5 +107,5 @@ func selfAvatarOrigin(u *url.URL) bool {
 		return false
 	}
 	host := u.Hostname()
-	return strings.HasSuffix(host, ".oaiusercontent.com") || host == "cdn.openai.com" || strings.HasSuffix(host, ".oaistatic.com") || host == "cdn.auth0.com" || host == "gravatar.com" || strings.HasSuffix(host, ".gravatar.com") || host == "lh3.googleusercontent.com"
+	return host == "chatgpt.com" || strings.HasSuffix(host, ".oaiusercontent.com") || host == "cdn.openai.com" || strings.HasSuffix(host, ".oaistatic.com") || host == "cdn.auth0.com" || host == "gravatar.com" || strings.HasSuffix(host, ".gravatar.com") || host == "lh3.googleusercontent.com"
 }
