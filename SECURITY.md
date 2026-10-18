@@ -19,8 +19,10 @@ control and published artifacts. Protect provisioning with encrypted transport.
 Diagnostic logs can contain account or message metadata; SQL-argument
 redaction does not make all logs safe to share. Avoid HTTP payload tracing.
 
-Media downloads use allowlisted origins, reject redirects and send no ChatGPT
-credentials to storage hosts.
+Media downloads use allowlisted origins and send no ChatGPT credentials to
+storage hosts. Own-account avatars may follow up to three redirects, with the
+same origin allowlist checked at every hop and no avatar URL forwarded as Referer.
+Other media downloads reject redirects.
 
 ## Reporting a vulnerability
 

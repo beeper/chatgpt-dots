@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -77,8 +78,11 @@ func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) e
 		return err
 	}
 	u, err := url.Parse(endpoint.URL)
-	if err != nil || u.Scheme != "wss" || u.Host != "ws.chatgpt.com" || u.User != nil || u.Path != "/p0/ws/user/"+c.Identity.User {
-		return errors.New("unexpected ChatGPT messaging socket origin")
+	if err != nil {
+		return errors.New("invalid ChatGPT messaging socket URL")
+	}
+	if u.Scheme != "wss" || u.User != nil || u.Host != "ws.chatgpt.com" {
+		return fmt.Errorf("unexpected ChatGPT messaging socket origin %s://%s", u.Scheme, u.Host)
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	conn, _, err := websocket.Dial(dialCtx, endpoint.URL, &websocket.DialOptions{HTTPClient: &http.Client{Transport: c.http.Transport, CheckRedirect: c.http.CheckRedirect}})
