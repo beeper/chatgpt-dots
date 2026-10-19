@@ -12,6 +12,8 @@ import (
 	"path"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/gabriel-vasile/mimetype"
 )
 
 const MaxDownloadSize = 20 << 20
@@ -101,8 +103,8 @@ func (c *Client) DownloadAttachment(ctx context.Context, room, fileID string) (*
 		}
 	}
 	mimeType, _, err := mime.ParseMediaType(metadata.MIME)
-	if err != nil || mimeType == "" || mimeType == "application/octet-stream" {
-		mimeType, _, _ = mime.ParseMediaType(http.DetectContentType(data))
+	if err != nil || mimeType == "" || mimeType == "application/octet-stream" || mimeType == "application/zip" {
+		mimeType, _, _ = mime.ParseMediaType(mimetype.Detect(data).String())
 		if mimeType == "application/octet-stream" {
 			if extensionType := mime.TypeByExtension(strings.ToLower(path.Ext(name))); extensionType != "" {
 				mimeType, _, _ = mime.ParseMediaType(extensionType)
