@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
-	"maunium.net/go/mautrix/crypto/attachment"
 	"maunium.net/go/mautrix/event"
 )
 
@@ -34,18 +33,7 @@ func (c *Client) downloadAttachment(ctx context.Context, content *event.MessageE
 		return data, nil
 	case errors.Is(err, errAttachmentTooLarge):
 		return nil, errAttachmentTooLarge
-	case isAttachmentDecryptionError(err):
-		return nil, errors.New("could not decrypt or verify the Matrix attachment; no message sent")
 	default:
 		return nil, errors.New("could not download the Matrix attachment; no message sent")
 	}
-}
-
-func isAttachmentDecryptionError(err error) bool {
-	return errors.Is(err, attachment.ErrHashMismatch) ||
-		errors.Is(err, attachment.ErrUnsupportedVersion) ||
-		errors.Is(err, attachment.ErrUnsupportedAlgorithm) ||
-		errors.Is(err, attachment.ErrInvalidKey) ||
-		errors.Is(err, attachment.ErrInvalidInitVector) ||
-		errors.Is(err, attachment.ErrInvalidHash)
 }
