@@ -112,17 +112,17 @@ func incomingDropsContent(m chatgpt.Message, existing []*database.Message) bool 
 	if m.Deleted != nil || len(existing) == 0 {
 		return false
 	}
-	expected := expectedIncomingParts(m, existing)
-	if len(expected) == 0 {
+	if len(expectedIncomingParts(m, existing)) == 0 {
 		return true
 	}
+	bridged := 0
 	for _, part := range existing {
 		md, ok := part.Metadata.(*MessageMetadata)
-		if ok && !md.TextAnchor && part.PartID != "deleted" && !expected[part.PartID] {
-			return true
+		if ok && (md.OutgoingMedia || !md.TextAnchor && strings.HasPrefix(string(part.PartID), "attachment-")) {
+			bridged++
 		}
 	}
-	return false
+	return len(mappedAttachments(m, existing)) < bridged
 }
 
 func incomingSaved(m chatgpt.Message, existing []*database.Message) bool {
