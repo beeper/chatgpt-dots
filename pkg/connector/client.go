@@ -51,6 +51,7 @@ type Client struct {
 	receipts       map[string]*receiptState
 	delivered      map[string][32]byte
 	deliveredOrder []string
+	mediaRetries   map[string]*mediaRetry
 }
 
 func (c *Client) Connect(ctx context.Context) {
@@ -228,7 +229,9 @@ func (c *Client) run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if c.state(err) {
+			if errors.Is(err, errMediaRetry) {
+				c.login.Log.Warn().Err(err).Msg("Waiting to retry a ChatGPT attachment download")
+			} else if c.state(err) {
 				return
 			}
 			delay = min(delay*2, time.Minute)
@@ -690,7 +693,7 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	}
 	result := c.login.QueueRemoteEvent(msg)
 	if !result.Success || result.Ignored {
-		return errors.New("bridge could not queue remote message; checkpoint retained")
+		return c.mediaRetryOr(m.ID, errors.New("bridge could not queue remote message; checkpoint retained"))
 	}
 	select {
 	case <-ctx.Done():
@@ -702,12 +705,13 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		return err
 	}
 	if !incomingSaved(m, saved) {
-		return errors.New("remote message parts not durably saved; checkpoint retained")
+		return c.mediaRetryOr(m.ID, errors.New("remote message parts not durably saved; checkpoint retained"))
 	}
 	if err = c.saveThreadSnapshots(ctx, m, saved); err != nil {
 		return err
 	}
 	c.mu.Lock()
+	delete(c.mediaRetries, m.ID)
 	pending, exists := c.meta.Pending[m.RequestID]
 	if exists {
 		delete(c.meta.Pending, m.RequestID)

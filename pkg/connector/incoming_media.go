@@ -175,8 +175,14 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			content, err = incomingFile(ctx, api, state, portal, intent, attachment.FileID)
 			if err != nil {
 				var unavailable *chatgpt.AttachmentUnavailableError
-				if !errors.As(err, &unavailable) || ctx.Err() != nil {
+				if ctx.Err() != nil {
 					return nil, err
+				}
+				if !errors.As(err, &unavailable) {
+					if c.retryMedia(m.ID, err) {
+						return nil, fmt.Errorf("%w: %w", bridgev2.ErrIgnoringRemoteEvent, err)
+					}
+					unavailable = &chatgpt.AttachmentUnavailableError{Reason: err.Error()}
 				}
 				content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "[ChatGPT attachment unavailable: " + unavailable.Reason + "]"}
 			}
@@ -230,4 +236,42 @@ func incomingFile(ctx context.Context, api *chatgpt.Client, state *RoomState, po
 		return nil, errors.New("Matrix attachment upload failed; checkpoint retained")
 	}
 	return content, nil
+}
+
+const mediaRetryWindow = 30 * time.Minute
+
+var errMediaRetry = errors.New("ChatGPT attachment download failed; checkpoint retained for retry")
+
+type mediaRetry struct {
+	since   time.Time
+	pending error
+}
+
+func (c *Client) retryMedia(messageID string, err error) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.mediaRetries == nil {
+		c.mediaRetries = make(map[string]*mediaRetry)
+	}
+	retry := c.mediaRetries[messageID]
+	if retry == nil {
+		retry = &mediaRetry{since: time.Now()}
+		c.mediaRetries[messageID] = retry
+	}
+	if time.Since(retry.since) >= mediaRetryWindow {
+		return false
+	}
+	retry.pending = err
+	return true
+}
+
+func (c *Client) mediaRetryOr(messageID string, err error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if retry := c.mediaRetries[messageID]; retry != nil && retry.pending != nil {
+		pending := retry.pending
+		retry.pending = nil
+		return fmt.Errorf("%w: %w", errMediaRetry, pending)
+	}
+	return err
 }

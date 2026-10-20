@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"io"
 	"mime"
@@ -75,7 +76,7 @@ func (c *Client) DownloadAttachment(ctx context.Context, room, fileID string) (*
 		return nil, &AttachmentUnavailableError{Reason: "ChatGPT attachment is no longer available"}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New("attachment storage denied the download")
+		return nil, fmt.Errorf("attachment storage denied the download (HTTP %d)", resp.StatusCode)
 	}
 	if resp.ContentLength > MaxDownloadSize {
 		return nil, &AttachmentUnavailableError{Reason: "file exceeds the bridge-local 20 MiB limit"}
