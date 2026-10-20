@@ -77,17 +77,20 @@ type egress struct {
 	api       *req.Transport
 	websocket *http.Transport
 	cookies   *cookiejar.Jar
+	proxyHost string
 }
 
 func newEgress(proxy *url.URL) *egress {
 	api := req.C().ImpersonateChrome()
 	websocket := http.DefaultTransport.(*http.Transport).Clone()
+	var proxyHost string
 	if proxy != nil {
 		api.SetProxy(http.ProxyURL(proxy))
 		websocket.Proxy = http.ProxyURL(proxy)
+		proxyHost = proxy.Host
 	}
 	cookies, _ := cookiejar.New(nil)
-	return &egress{api: api.GetTransport(), websocket: websocket, cookies: cookies}
+	return &egress{api: api.GetTransport(), websocket: websocket, cookies: cookies, proxyHost: proxyHost}
 }
 
 func (e *egress) close() {
@@ -121,6 +124,11 @@ func (t *proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		if r.Context().Err() != context.Canceled {
 			t.failed.Store(true)
+			t.log.Warn().Err(err).
+				Str("proxy_host", current.proxyHost).
+				Str("host", r.URL.Host).
+				Str("path", r.URL.Path).
+				Msg("ChatGPT transport error")
 		}
 		return nil, err
 	}
@@ -135,6 +143,9 @@ func (t *proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func (t *proxyTransport) update(ctx context.Context, reason string) error {
+	if t.failed.Load() {
+		reason = "reconnect"
+	}
 	addr, err := t.connector.getProxy(ctx, reason)
 	if err != nil {
 		return err
