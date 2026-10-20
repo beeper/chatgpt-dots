@@ -229,7 +229,7 @@ func (c *Client) run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if errors.Is(err, errMediaRetry) {
+			if onlyMediaRetries(err) {
 				c.login.Log.Warn().Err(err).Msg("Waiting to retry a ChatGPT attachment download")
 			} else if c.state(err) {
 				return

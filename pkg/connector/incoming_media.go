@@ -175,14 +175,17 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			content, err = incomingFile(ctx, api, state, portal, intent, attachment.FileID)
 			if err != nil {
 				var unavailable *chatgpt.AttachmentUnavailableError
+				var storage *chatgpt.AttachmentStorageError
 				if ctx.Err() != nil {
 					return nil, err
 				}
-				if !errors.As(err, &unavailable) {
+				if errors.As(err, &storage) {
 					if c.retryMedia(m.ID, err) {
 						return nil, fmt.Errorf("%w: %w", bridgev2.ErrIgnoringRemoteEvent, err)
 					}
-					unavailable = &chatgpt.AttachmentUnavailableError{Reason: err.Error()}
+					unavailable = &chatgpt.AttachmentUnavailableError{Reason: storage.Reason}
+				} else if !errors.As(err, &unavailable) {
+					return nil, err
 				}
 				content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "[ChatGPT attachment unavailable: " + unavailable.Reason + "]"}
 			}
@@ -240,7 +243,26 @@ func incomingFile(ctx context.Context, api *chatgpt.Client, state *RoomState, po
 
 const mediaRetryWindow = 30 * time.Minute
 
-var errMediaRetry = errors.New("ChatGPT attachment download failed; checkpoint retained for retry")
+type mediaRetryError struct{ error }
+
+func (e mediaRetryError) Error() string {
+	return "ChatGPT attachment download failed; checkpoint retained for retry: " + e.error.Error()
+}
+
+func (e mediaRetryError) Unwrap() error { return e.error }
+
+func onlyMediaRetries(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, member := range joined.Unwrap() {
+			if member != nil && !onlyMediaRetries(member) {
+				return false
+			}
+		}
+		return true
+	}
+	_, ok := err.(mediaRetryError)
+	return ok
+}
 
 type mediaRetry struct {
 	since   time.Time
@@ -271,7 +293,7 @@ func (c *Client) mediaRetryOr(messageID string, err error) error {
 	if retry := c.mediaRetries[messageID]; retry != nil && retry.pending != nil {
 		pending := retry.pending
 		retry.pending = nil
-		return fmt.Errorf("%w: %w", errMediaRetry, pending)
+		return mediaRetryError{pending}
 	}
 	return err
 }
