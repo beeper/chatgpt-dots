@@ -125,7 +125,7 @@ func (l *Login) SubmitCookies(ctx context.Context, input map[string]string) (*br
 	var providerError *chatgpt.HTTPError
 	if errors.As(err, &providerError) {
 		if providerError.PrimaryUnavailable {
-			return nil, bridgev2.RespError(mautrix.MForbidden.WithMessage("ChatGPT Dots isn't available on this ChatGPT account. Dots come with ChatGPT Pro and Business Premium and are still rolling out; check chatgpt.com/dots, then connect again."))
+			return nil, bridgev2.RespError(mautrix.MForbidden.WithMessage("This ChatGPT account doesn't have a Dot yet. Dots are rolling out to ChatGPT Pro, Business Premium and Enterprise, but not in every region. Create yours at chatgpt.com/dots, then connect again."))
 		}
 		return nil, bridgev2.WrapRespErr(fmt.Errorf("ChatGPT Dots setup failed while %w. Retry setup, or contact Beeper support if this continues", err), mautrix.MUnknown)
 	}
