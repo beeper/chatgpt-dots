@@ -108,6 +108,23 @@ func expectedIncomingParts(m chatgpt.Message, existing []*database.Message) map[
 	return parts
 }
 
+func incomingDropsContent(m chatgpt.Message, existing []*database.Message) bool {
+	if m.Deleted != nil || len(existing) == 0 {
+		return false
+	}
+	expected := expectedIncomingParts(m, existing)
+	if len(expected) == 0 {
+		return true
+	}
+	for _, part := range existing {
+		md, ok := part.Metadata.(*MessageMetadata)
+		if ok && !md.TextAnchor && part.PartID != "deleted" && !expected[part.PartID] {
+			return true
+		}
+	}
+	return false
+}
+
 func incomingSaved(m chatgpt.Message, existing []*database.Message) bool {
 	expected := incomingRevisions(m, existing)
 	if len(existing) != len(expected) {

@@ -659,6 +659,10 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		return result, nil
 	}
 	msg.HandleExistingFunc = func(ctx context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (bridgev2.UpsertResult, error) {
+		if incomingDropsContent(m, existing) {
+			c.login.Log.Warn().Str("message_id", m.ID).Msg("ChatGPT returned a message without content that is already bridged; keeping the bridged parts")
+			return bridgev2.UpsertResult{}, nil
+		}
 		legacy := incomingRevisionsWithBase(m, existing, messageRevision(m, true))
 		current := incomingRevisions(m, existing)
 		for _, part := range existing {
@@ -701,7 +705,7 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	if err != nil {
 		return err
 	}
-	if !incomingSaved(m, saved) {
+	if !incomingSaved(m, saved) && !incomingDropsContent(m, saved) {
 		return errors.New("remote message parts not durably saved; checkpoint retained")
 	}
 	if err = c.saveThreadSnapshots(ctx, m, saved); err != nil {
