@@ -655,14 +655,16 @@ func (c *Client) saveMediaRetry(ctx context.Context, state *RoomState, id, after
 	}
 	if failed {
 		delay := min(max(old.Delay*2, 30*time.Second), 15*time.Minute)
+		next := time.Now().Add(delay)
 		if exists && after != old.After && after != old.Start {
-			delay = 30 * time.Second
+			delay = max(old.Delay, 30*time.Second)
+			next = time.Now().Add(30 * time.Second)
 		}
 		start := old.Start
 		if !exists {
 			start = after
 		}
-		state.Media[id] = MediaRetry{Start: start, After: after, Revision: revision, Next: time.Now().Add(delay), Delay: delay}
+		state.Media[id] = MediaRetry{Start: start, After: after, Revision: revision, Next: next, Delay: delay}
 	} else {
 		delete(state.Media, id)
 	}
