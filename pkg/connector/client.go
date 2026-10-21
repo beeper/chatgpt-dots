@@ -221,20 +221,19 @@ func (c *Client) run(ctx context.Context) {
 				err = errors.Join(err, proxyErr)
 			}
 		}
-		if err != nil {
+		if err != nil && !onlyMediaRetries(err) {
 			if ctx.Err() != nil {
 				return
 			}
-			if onlyMediaRetries(err) {
-				c.login.Log.Warn().Err(err).Msg("Waiting to retry a ChatGPT attachment download")
-				c.connected.Store(true)
-				c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
-			} else if c.state(err) {
+			if c.state(err) {
 				return
 			}
 			delay = min(delay*2, time.Minute)
 			nextPoll = time.Time{}
 		} else {
+			if err != nil {
+				c.login.Log.Warn().Err(err).Msg("Waiting to retry a ChatGPT attachment download")
+			}
 			c.connected.Store(true)
 			c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 			delay = pollInterval
