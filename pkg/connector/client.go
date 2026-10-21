@@ -232,7 +232,7 @@ func (c *Client) run(ctx context.Context) {
 			nextPoll = time.Time{}
 		} else {
 			if err != nil {
-				c.login.Log.Warn().Err(err).Msg("Waiting to retry a ChatGPT attachment download")
+				c.login.Log.Debug().Err(err).Msg("Waiting to retry a ChatGPT attachment download")
 			}
 			c.connected.Store(true)
 			c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
@@ -655,6 +655,9 @@ func (c *Client) saveMediaRetry(ctx context.Context, state *RoomState, id, after
 	}
 	if failed {
 		delay := min(max(old.Delay*2, 30*time.Second), 15*time.Minute)
+		if exists && after != old.After && after != old.Start {
+			delay = 30 * time.Second
+		}
 		start := old.Start
 		if !exists {
 			start = after
