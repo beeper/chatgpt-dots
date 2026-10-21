@@ -51,7 +51,6 @@ type Client struct {
 	receipts       map[string]*receiptState
 	delivered      map[string][32]byte
 	deliveredOrder []string
-	mediaRetries   map[string]*mediaRetry
 }
 
 func (c *Client) Connect(ctx context.Context) {
@@ -202,10 +201,7 @@ func (c *Client) run(ctx context.Context) {
 				nextPoll = time.Now().Add(livePollInterval)
 			}
 		}
-		threadErr := c.refreshThreads(ctx, api)
-		if err == nil {
-			err = threadErr
-		}
+		err = errors.Join(err, c.refreshThreads(ctx, api))
 		if !time.Now().Before(nextProfileRefresh) {
 			avatars := !time.Now().Before(nextAvatarRefresh)
 			if avatars {
@@ -231,6 +227,8 @@ func (c *Client) run(ctx context.Context) {
 			}
 			if onlyMediaRetries(err) {
 				c.login.Log.Warn().Err(err).Msg("Waiting to retry a ChatGPT attachment download")
+				c.connected.Store(true)
+				c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 			} else if c.state(err) {
 				return
 			}
@@ -469,15 +467,30 @@ func (c *Client) advanceCursor(ctx context.Context, state *RoomState, id string)
 	return nil
 }
 func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
-	full := c.rescan.Swap(false) || !c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion
+	full := c.rescan.Swap(false) || c.meta.Rescan || !c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion
 	if full {
+		if !c.meta.Rescan {
+			c.mu.Lock()
+			c.meta.Rescan = true
+			err = c.login.Save(ctx)
+			if err != nil {
+				c.meta.Rescan = false
+			}
+			c.mu.Unlock()
+			if err != nil {
+				c.rescan.Store(true)
+				return err
+			}
+		}
 		defer func() {
 			if err != nil {
 				c.rescan.Store(true)
 			}
 		}()
 	}
+	var pending error
 	for _, state := range c.meta.Rooms {
+		blocked := false
 		receipt, err := c.readReceipt(ctx, api, state)
 		if err != nil {
 			return err
@@ -497,7 +510,11 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			}
 			if m != nil {
 				if err = c.deliver(ctx, state, *m); err != nil {
-					return err
+					if !onlyMediaRetries(err) {
+						return err
+					}
+					pending = errors.Join(pending, err)
+					blocked = true
 				}
 			}
 		}
@@ -529,7 +546,12 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 				fingerprint, ok := messageFingerprint(m)
 				if full || !ok || c.delivered[m.ID] != fingerprint {
 					if err = c.deliver(ctx, state, m); err != nil {
-						return err
+						if !onlyMediaRetries(err) {
+							return err
+						}
+						pending = errors.Join(pending, err)
+						blocked = true
+						continue
 					}
 					if err = c.syncReactions(ctx, state, m); err != nil {
 						return err
@@ -545,7 +567,7 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 						c.delivered[m.ID] = fingerprint
 					}
 				}
-				if !full {
+				if !full && !blocked {
 					if err = c.advanceCursor(ctx, state, m.ID); err != nil {
 						return err
 					}
@@ -567,14 +589,19 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			return err
 		}
 	}
-	if full && (!c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion) {
+	if pending != nil {
+		return pending
+	}
+	if full {
 		c.mu.Lock()
 		oldSynced, oldVersion := c.meta.ConfirmationsSynced, c.meta.ConfirmationVersion
 		c.meta.ConfirmationsSynced = true
+		c.meta.Rescan = false
 		c.meta.ConfirmationVersion = confirmationRenderingVersion
 		err = c.login.Save(ctx)
 		if err != nil {
 			c.meta.ConfirmationsSynced, c.meta.ConfirmationVersion = oldSynced, oldVersion
+			c.meta.Rescan = true
 		}
 		c.mu.Unlock()
 		if err != nil {
@@ -621,11 +648,15 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		original := &bridgev2.MatrixMessage{MatrixEventBase: bridgev2.MatrixEventBase[*event.MessageEventContent]{Portal: p, Event: &event.Event{ID: pending.EventID, RoomID: p.MXID, Sender: pending.Sender, Timestamp: pending.Timestamp, Type: event.EventMessage}}}
 		original.AddPendingToSave(&database.Message{SenderID: c.GetUserID(), Metadata: &MessageMetadata{Revision: revision(m), OutgoingMedia: pending.Media}}, networkid.TransactionID(m.RequestID), nil)
 	}
+	var conversionErr error
 	msg.ConvertMessageFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, _ chatgpt.Message) (*bridgev2.ConvertedMessage, error) {
-		return c.convertIncoming(ctx, state, p, intent, m, nil)
+		converted, err := c.convertIncoming(ctx, state, p, intent, m, nil)
+		conversionErr = err
+		return converted, err
 	}
 	msg.ConvertEditFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
 		converted, err := c.convertIncoming(ctx, state, p, intent, m, existing)
+		conversionErr = err
 		if err != nil {
 			return nil, err
 		}
@@ -691,27 +722,42 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		}
 		return bridgev2.UpsertResult{SubEvents: []bridgev2.RemoteEvent{&edit}}, nil
 	}
+	conversionFailure := func() error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var storage *chatgpt.AttachmentStorageError
+		if errors.As(conversionErr, &storage) {
+			return mediaRetryError{storage}
+		}
+		return conversionErr
+	}
 	result := c.login.QueueRemoteEvent(msg)
 	if !result.Success || result.Ignored {
-		return c.mediaRetryOr(m.ID, errors.New("bridge could not queue remote message; checkpoint retained"))
+		if err := conversionFailure(); err != nil {
+			return err
+		}
+		return errors.New("bridge could not queue remote message; checkpoint retained")
 	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-done:
 	}
+	if err := conversionFailure(); err != nil {
+		return err
+	}
 	saved, err := c.connector.bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(m.ID))
 	if err != nil {
 		return err
 	}
 	if !incomingSaved(m, saved) {
-		return c.mediaRetryOr(m.ID, errors.New("remote message parts not durably saved; checkpoint retained"))
+		return errors.New("remote message parts not durably saved; checkpoint retained")
 	}
 	if err = c.saveThreadSnapshots(ctx, m, saved); err != nil {
 		return err
 	}
 	c.mu.Lock()
-	delete(c.mediaRetries, m.ID)
 	pending, exists := c.meta.Pending[m.RequestID]
 	if exists {
 		delete(c.meta.Pending, m.RequestID)

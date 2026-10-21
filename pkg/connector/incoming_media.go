@@ -180,10 +180,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 					return nil, err
 				}
 				if errors.As(err, &storage) {
-					if c.retryMedia(m.ID, err) {
-						return nil, fmt.Errorf("%w: %w", bridgev2.ErrIgnoringRemoteEvent, err)
-					}
-					unavailable = &chatgpt.AttachmentUnavailableError{Reason: storage.Reason}
+					return nil, fmt.Errorf("%w: %w", bridgev2.ErrIgnoringRemoteEvent, err)
 				} else if !errors.As(err, &unavailable) {
 					return nil, err
 				}
@@ -241,8 +238,6 @@ func incomingFile(ctx context.Context, api *chatgpt.Client, state *RoomState, po
 	return content, nil
 }
 
-const mediaRetryWindow = 30 * time.Minute
-
 type mediaRetryError struct{ error }
 
 func (e mediaRetryError) Error() string {
@@ -262,38 +257,4 @@ func onlyMediaRetries(err error) bool {
 	}
 	_, ok := err.(mediaRetryError)
 	return ok
-}
-
-type mediaRetry struct {
-	since   time.Time
-	pending error
-}
-
-func (c *Client) retryMedia(messageID string, err error) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.mediaRetries == nil {
-		c.mediaRetries = make(map[string]*mediaRetry)
-	}
-	retry := c.mediaRetries[messageID]
-	if retry == nil {
-		retry = &mediaRetry{since: time.Now()}
-		c.mediaRetries[messageID] = retry
-	}
-	if time.Since(retry.since) >= mediaRetryWindow {
-		return false
-	}
-	retry.pending = err
-	return true
-}
-
-func (c *Client) mediaRetryOr(messageID string, err error) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if retry := c.mediaRetries[messageID]; retry != nil && retry.pending != nil {
-		pending := retry.pending
-		retry.pending = nil
-		return mediaRetryError{pending}
-	}
-	return err
 }

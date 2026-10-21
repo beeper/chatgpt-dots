@@ -76,9 +76,6 @@ func (c *Client) DownloadAttachment(ctx context.Context, room, fileID string) (*
 		return nil, &AttachmentStorageError{Reason: "attachment storage download failed"}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		return nil, &AttachmentUnavailableError{Reason: "ChatGPT attachment is no longer available"}
-	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, &AttachmentStorageError{Reason: fmt.Sprintf("attachment storage denied the download (HTTP %d)", resp.StatusCode)}
 	}

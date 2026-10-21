@@ -29,6 +29,7 @@ type LoginMetadata struct {
 	Confirmations       map[string]ConfirmationAction `json:"confirmations,omitempty"`
 	ConfirmationsSynced bool                          `json:"confirmations_synced,omitempty"`
 	ConfirmationVersion int                           `json:"confirmation_version,omitempty"`
+	Rescan              bool                          `json:"rescan,omitempty"`
 	SelfAvatarHash      string                        `json:"self_avatar_hash,omitempty"`
 }
 type PendingSend struct {
