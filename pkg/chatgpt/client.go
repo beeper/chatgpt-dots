@@ -95,6 +95,12 @@ type Page struct {
 	Next  string    `json:"next_cursor"`
 	Prev  string    `json:"prev_cursor"`
 }
+
+var (
+	ErrTransport    = errors.New("ChatGPT transport failed")
+	ErrNoPrimaryDot = errors.New("no available primary Dot; select an existing Dot in ChatGPT")
+)
+
 type HTTPError struct {
 	Status             int
 	Path               string
@@ -194,7 +200,7 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return errors.New("ChatGPT transport failed; delivery may be unknown")
+		return fmt.Errorf("%w; delivery may be unknown", ErrTransport)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -235,7 +241,7 @@ func (c *Client) refresh(ctx context.Context) error {
 	req.AddCookie(&http.Cookie{Name: "__Secure-next-auth.session-token", Value: c.credentials.SessionToken})
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return errors.New("ChatGPT session renewal failed; retry when the connection is restored")
+		return fmt.Errorf("%w during session renewal; retry when the connection is restored", ErrTransport)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -278,7 +284,7 @@ func (c *Client) Discover(ctx context.Context) ([]Profile, error) {
 		return nil, fmt.Errorf("finding the primary Dot: %w", err)
 	}
 	if primary.Selection == nil || !primary.Selection.Available {
-		return nil, errors.New("no available primary Dot; select an existing Dot in ChatGPT")
+		return nil, ErrNoPrimaryDot
 	}
 	s := primary.Selection
 	var p Profile

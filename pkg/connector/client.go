@@ -102,13 +102,13 @@ func (c *Client) LogoutRemote(context.Context) {
 	ctx, cancel := context.WithTimeout(c.connector.bridge.BackgroundCtx, 30*time.Second)
 	defer cancel()
 	if err := c.connector.removeCredentials(ctx, c.login); err != nil {
-		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateUnknownError, Message: err.Error()})
+		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateUnknownError, Error: stateCredentialCleanupFailed, Info: map[string]any{"go_error": err.Error()}})
 	}
 }
 
 func (c *Client) state(err error) bool {
 	c.connected.Store(false)
-	state := status.BridgeState{StateEvent: status.StateTransientDisconnect, Message: err.Error()}
+	state := status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: stateSyncFailed, Info: map[string]any{"go_error": err.Error()}}
 	var httpErr *chatgpt.HTTPError
 	if errors.As(err, &httpErr) {
 		c.login.Log.Warn().Err(err).
@@ -118,13 +118,20 @@ func (c *Client) state(err error) bool {
 			Msg("ChatGPT request failed")
 		switch {
 		case httpErr.Status == http.StatusUnauthorized:
-			state.StateEvent = status.StateBadCredentials
-			state.Error = "chatgpt-auth-expired"
+			state = badCredentialsState(stateAuthExpired, err)
 		case httpErr.Challenge:
-			state.Error = "chatgpt-cloudflare-challenge"
+			state.Error = stateCloudflareChallenge
 		case httpErr.Status == http.StatusForbidden:
-			state.Error = "chatgpt-forbidden"
+			state.Error = stateForbidden
+		case httpErr.Status == http.StatusTooManyRequests:
+			state.Error = stateRateLimited
+		case httpErr.Status >= 500:
+			state.Error = stateServerError
+		default:
+			state.Error = stateRequestFailed
 		}
+	} else if isTransportError(err) {
+		state.Error = stateNetworkError
 	}
 	c.login.BridgeState.Send(state)
 	return state.StateEvent == status.StateBadCredentials
@@ -140,18 +147,21 @@ func (c *Client) run(ctx context.Context) {
 	}
 	c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnecting})
 	creds, err := c.connector.readCredentials(ctx, c.login)
-	if err != nil {
-		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateBadCredentials, Message: err.Error()})
+	if errors.Is(err, errNoCredentials) {
+		c.login.BridgeState.Send(badCredentialsState(stateNoCredentials, err))
+		return
+	} else if err != nil {
+		c.login.BridgeState.Send(badCredentialsState(stateBadCredentials, err))
 		return
 	}
 	proxy := &proxyTransport{connector: c.connector, log: c.login.Log}
 	api, err := chatgpt.New(creds, proxy)
 	if err != nil {
-		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateBadCredentials, Message: err.Error()})
+		c.login.BridgeState.Send(badCredentialsState(stateBadCredentials, err))
 		return
 	}
 	if api.Identity.Account != c.meta.Account || api.Identity.User != c.meta.User {
-		c.state(errors.New("credential identity changed; reconnect the original ChatGPT account"))
+		c.login.BridgeState.Send(badCredentialsState(stateIdentityChanged, errors.New("credential identity changed")))
 		return
 	}
 	api.PersistCredentials = func(updated chatgpt.Credentials) error {
@@ -727,10 +737,15 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	defer c.sendMu.Unlock()
 	media := msg.Content.MsgType == event.MsgImage || msg.Content.MsgType == event.MsgFile || msg.Content.MsgType == event.MsgVideo
 	if !media && (msg.Content.MsgType != event.MsgText || msg.Content.Body == "") {
-		return nil, errors.New("only plain text, images, files and videos are supported; audio and voice messages are not supported")
+		return nil, bridgev2.ErrUnsupportedMessageType
 	}
 	if msg.ReplyTo != nil || msg.ThreadRoot != nil {
-		return nil, errors.New("replies and threads are not supported; send a standalone message")
+		return nil, bridgev2.WrapErrorInStatus(errors.New("replies and threads are not supported")).
+			WithMessage("replies and threads aren't supported, send a standalone message").
+			WithErrorReason(event.MessageStatusUnsupported).
+			WithStatus(event.MessageStatusFail).
+			WithIsCertain(true).
+			WithSendNotice(true)
 	}
 	c.mu.RLock()
 	api := c.api
@@ -738,26 +753,29 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	state := c.meta.Rooms[string(msg.Portal.ID)]
 	c.mu.RUnlock()
 	if api == nil || runContext == nil || runContext.Err() != nil || !c.connected.Load() {
-		return nil, errors.New("ChatGPT Dots is disconnected; reconnect before sending")
+		return nil, bridgev2.WrapErrorInStatus(errors.New("not connected to ChatGPT")).
+			WithMessage("not connected to ChatGPT, try again in a moment").
+			WithIsCertain(true).
+			WithSendNotice(true)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(runContext, cancel)
 	defer stop()
 	if state == nil || msg.Portal.Receiver != c.login.ID {
-		return nil, errors.New("refusing unverified Dot room")
+		return nil, relinkStatus(errors.New("refusing unverified Dot room"), true)
 	}
 	room, err := api.Verify(ctx, state.Profile)
 	if err != nil {
 		c.state(err)
-		return nil, err
+		return nil, wrapSendError(err, true)
 	}
 	current, err := roomState(api, state.Profile, room)
 	if err != nil {
-		return nil, err
+		return nil, relinkStatus(err, true)
 	}
 	if current.DotMember != state.DotMember || current.HumanMember != state.HumanMember {
-		return nil, errors.New("Dot room members changed; refusing send")
+		return nil, relinkStatus(errors.New("dot room members changed; refusing send"), true)
 	}
 	requestID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(string(c.login.ID)+"\x00"+string(msg.Event.ID))).String()
 	fingerprint := []byte(msg.Content.Body)
@@ -769,7 +787,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 			return nil, errors.New("cannot fingerprint attachment content")
 		}
 		if msg.Content.Info != nil && msg.Content.Info.Size > chatgpt.MaxUploadSize {
-			return nil, errors.New("attachment exceeds the bridge-local 20 MiB limit")
+			return nil, bridgev2.ErrMediaTooLarge
 		}
 	}
 	hash := sha256.Sum256(fingerprint)
@@ -782,7 +800,11 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	wasUncertain := retry && !pending.KnownUnsent
 	if retry && (pending.BodyHash != bodyHash || pending.Room != state.Profile.Room || pending.EventID != msg.Event.ID || pending.Media != media) {
 		c.mu.Unlock()
-		return nil, errors.New("retry content differs from the original request; refusing to reuse its request ID")
+		return nil, bridgev2.WrapErrorInStatus(errors.New("retry content differs from the original request; refusing to reuse its request ID")).
+			WithMessage("this retry doesn't match the original message, so it can't be sent").
+			WithStatus(event.MessageStatusFail).
+			WithIsCertain(!wasUncertain).
+			WithSendNotice(true)
 	}
 	if !retry {
 		pending = PendingSend{Room: state.Profile.Room, EventID: msg.Event.ID, Sender: msg.Event.Sender, Timestamp: msg.Event.Timestamp, BodyHash: bodyHash, Media: media, KnownUnsent: true}
@@ -796,7 +818,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	if retry && !pending.KnownUnsent {
 		found, err := c.findRequest(ctx, api, state, requestID)
 		if err != nil {
-			return nil, err
+			return nil, wrapSendError(err, false)
 		}
 		if found != nil {
 			return c.sendResponse(*found, media, runContext), nil
@@ -815,7 +837,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 			}
 			pending.FileID, err = api.Upload(ctx, state.Profile.Room, msg.Content.GetFileName(), mimeType, data)
 			if err != nil {
-				return nil, fmt.Errorf("attachment upload failed; no message sent (an uncertain upload may leave an unused file): %w", err)
+				return nil, wrapSendError(fmt.Errorf("attachment upload failed; no message sent (an uncertain upload may leave an unused file): %w", err), true)
 			}
 		}
 		c.mu.Lock()
@@ -861,7 +883,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 		if !certain {
 			err = fmt.Errorf("%w; delivery unknown: retry the original Beeper event to reconcile and reuse its request ID, not a new message", err)
 		}
-		return nil, bridgev2.WrapErrorInStatus(err).WithIsCertain(certain).WithErrorAsMessage()
+		return nil, wrapSendError(err, certain)
 	}
 	if m.Sender != state.HumanMember {
 		return nil, errors.New("send response sender identity mismatch; delivery unknown")

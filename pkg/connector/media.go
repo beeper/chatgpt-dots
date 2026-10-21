@@ -3,10 +3,12 @@ package connector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
+	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
 )
 
@@ -32,8 +34,8 @@ func (c *Client) downloadAttachment(ctx context.Context, content *event.MessageE
 	case err == nil:
 		return data, nil
 	case errors.Is(err, errAttachmentTooLarge):
-		return nil, errAttachmentTooLarge
+		return nil, bridgev2.ErrMediaTooLarge
 	default:
-		return nil, errors.New("could not download the Matrix attachment; no message sent")
+		return nil, fmt.Errorf("%w: %w", bridgev2.ErrMediaDownloadFailed, err)
 	}
 }

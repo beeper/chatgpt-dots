@@ -76,7 +76,7 @@ func (c *Connector) GetLoginFlows() []bridgev2.LoginFlow {
 }
 func (c *Connector) CreateLogin(_ context.Context, u *bridgev2.User, flow string) (bridgev2.LoginProcess, error) {
 	if flow != "cookies" {
-		return nil, errors.New("unknown login flow")
+		return nil, bridgev2.ErrInvalidLoginFlowID
 	}
 	return &Login{connector: c, user: u}, nil
 }
@@ -122,18 +122,14 @@ func (l *Login) Cancel() {
 }
 func (l *Login) SubmitCookies(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
 	step, err := l.submit(ctx, chatgpt.Credentials{AccessToken: input["access_token"], SessionToken: input["session_token"]})
-	var providerError *chatgpt.HTTPError
-	if errors.As(err, &providerError) {
-		if providerError.PrimaryUnavailable {
-			return nil, bridgev2.RespError(mautrix.MForbidden.WithMessage("This ChatGPT account doesn't have a Dot yet. Dots are rolling out to ChatGPT Pro, Business Premium and Enterprise, but not in every region. Create yours at chatgpt.com/dots, then connect again."))
-		}
-		return nil, bridgev2.WrapRespErr(fmt.Errorf("ChatGPT Dots setup failed while %w. Retry setup, or contact Beeper support if this continues", err), mautrix.MUnknown)
+	if err != nil {
+		return nil, wrapLoginError(err)
 	}
-	return step, err
+	return step, nil
 }
 func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*bridgev2.LoginStep, error) {
 	if credentials.SessionToken == "" {
-		return nil, errors.New("ChatGPT sign-in did not provide a renewable session; retry sign-in")
+		return nil, bridgev2.RespError(mautrix.MBadState.WithMessage("ChatGPT sign-in didn't provide a renewable session. Sign in again.").WithStatus(http.StatusBadRequest))
 	}
 	l.mu.Lock()
 	if l.cancelled {
@@ -173,11 +169,11 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 		return nil, err
 	}
 	if old != nil && old.UserMXID != l.user.MXID {
-		return nil, errors.New("this ChatGPT account is already linked to another Matrix user")
+		return nil, bridgev2.RespError(mautrix.MForbidden.WithMessage("This ChatGPT account is already connected to another Beeper account."))
 	}
 	if l.connector.loggingOut[loginID] {
 		if old != nil {
-			return nil, errors.New("ChatGPT logout is still finishing; retry after it completes")
+			return nil, bridgev2.RespError(mautrix.MBadState.WithMessage("Logging out of this ChatGPT account is still finishing. Try again in a moment.").WithStatus(http.StatusBadRequest))
 		}
 		delete(l.connector.loggingOut, loginID)
 	}
@@ -188,7 +184,7 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 		if old != nil && !linked {
 			*old.UserLogin = oldData
 			if err := old.Save(l.connector.bridge.BackgroundCtx); err != nil {
-				old.BridgeState.Send(status.BridgeState{StateEvent: status.StateUnknownError, Message: "Could not restore the previous ChatGPT login; reconnect the original account"})
+				old.BridgeState.Send(status.BridgeState{StateEvent: status.StateUnknownError, Error: stateRestoreFailed, Info: map[string]any{"go_error": err.Error()}})
 			}
 			_ = l.connector.LoadUserLogin(l.connector.bridge.BackgroundCtx, old)
 			old.Client.Connect(l.connector.bridge.BackgroundCtx)
@@ -215,7 +211,7 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 		meta.ConfirmationVersion = existing.ConfirmationVersion
 	}
 	if len(meta.Rooms) > 1 || (len(meta.Rooms) == 1 && meta.Rooms[profiles[0].Room] == nil) {
-		return nil, errors.New("the primary Dot differs from this connection; keeping the original Dot and message mappings")
+		return nil, bridgev2.RespError(mautrix.MBadState.WithMessage("This ChatGPT account's primary Dot is different from the one already connected. Log out of the existing ChatGPT connection to link the new Dot.").WithStatus(http.StatusBadRequest))
 	}
 	for _, p := range profiles {
 		room, err := api.Verify(ctx, p)
@@ -228,7 +224,7 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 		}
 		if previous := meta.Rooms[p.Room]; previous != nil {
 			if previous.Profile.ID != p.ID || previous.DotMember != state.DotMember || previous.HumanMember != state.HumanMember {
-				return nil, errors.New("Dot room identity changed; refusing to reuse mappings")
+				return nil, bridgev2.RespError(mautrix.MBadState.WithMessage("Your Dot chat in ChatGPT has changed since it was connected. Log out of the existing ChatGPT connection to link it again.").WithStatus(http.StatusBadRequest))
 			}
 		} else {
 			meta.Rooms[p.Room] = state
@@ -251,7 +247,7 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 	}
 	login, err := l.user.NewLogin(ctx, &database.UserLogin{ID: loginID, RemoteName: remoteName, RemoteProfile: status.RemoteProfile{Email: api.Identity.Email}, Metadata: meta}, nil)
 	if err != nil {
-		return nil, errors.New("could not save ChatGPT login")
+		return nil, fmt.Errorf("%w: %w", bridgev2.RespError(mautrix.MUnknown.WithMessage("Couldn't save the ChatGPT login. Try again.")), err)
 	}
 	linked = true
 	login.Client.Connect(l.connector.bridge.BackgroundCtx)
@@ -285,7 +281,7 @@ func roomState(api *chatgpt.Client, p chatgpt.Profile, r *chatgpt.Room) (*RoomSt
 	state.Overlap = []string{state.Baseline}
 	state.Linked = latest
 	if state.Baseline == "" {
-		return nil, errors.New("Dot room has no baseline message ID; send a message in ChatGPT before linking")
+		return nil, errNoBaseline
 	}
 	if latest.IsZero() {
 		return nil, errors.New("baseline message lacks a timestamp; cannot establish safe history boundary")

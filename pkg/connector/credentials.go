@@ -9,12 +9,15 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 )
 
-var errCredentialStorage = errors.New("could not access ChatGPT session storage")
+var (
+	errCredentialStorage = errors.New("could not access ChatGPT session storage")
+	errNoCredentials     = errors.New("ChatGPT session is not stored in this bridge database; reconnect with ChatGPT")
+)
 
 func (c *Connector) readCredentials(_ context.Context, login *bridgev2.UserLogin) (chatgpt.Credentials, error) {
 	meta := login.Metadata.(*LoginMetadata)
 	if meta.Credentials == nil {
-		return chatgpt.Credentials{}, errors.New("ChatGPT session is not stored in this bridge database; reconnect with ChatGPT")
+		return chatgpt.Credentials{}, errNoCredentials
 	}
 	if err := validateCredentials(meta, *meta.Credentials); err != nil {
 		return chatgpt.Credentials{}, err
