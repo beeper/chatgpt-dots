@@ -483,17 +483,54 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			}
 		}
 		defer func() {
-			if err != nil {
+			if err != nil && !onlyMediaRetries(err) {
 				c.rescan.Store(true)
 			}
 		}()
 	}
 	var pending error
 	for _, state := range c.meta.Rooms {
-		blocked := false
 		receipt, err := c.readReceipt(ctx, api, state)
 		if err != nil {
 			return err
+		}
+		for id, retry := range state.Media {
+			if time.Now().Before(retry.Next) {
+				continue
+			}
+			page, err := api.Messages(ctx, state.Profile.Room, retry.After)
+			if err != nil {
+				return err
+			}
+			var m *chatgpt.Message
+			for i := range page.Items {
+				if page.Items[i].ID == id {
+					m = &page.Items[i]
+					break
+				}
+			}
+			if m == nil {
+				next := retry.Start
+				if page.Next != "" {
+					next = page.Next
+				} else if len(page.Items) >= 32 {
+					sort.SliceStable(page.Items, func(i, j int) bool { return page.Items[i].Created.Before(page.Items[j].Created) })
+					next = page.Items[len(page.Items)-1].ID
+				}
+				if err = c.saveMediaRetry(ctx, state, id, next, retry.Revision, true); err != nil {
+					return err
+				}
+				continue
+			}
+			if m.Created.IsZero() {
+				return errors.New("provider message missing timestamp")
+			}
+			if err = c.deliverMedia(ctx, state, *m, retry.After); err != nil {
+				if !onlyMediaRetries(err) {
+					return err
+				}
+				pending = errors.Join(pending, err)
+			}
 		}
 		c.mu.RLock()
 		var pendingIDs []string
@@ -509,12 +546,11 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 				return err
 			}
 			if m != nil {
-				if err = c.deliver(ctx, state, *m); err != nil {
+				if err = c.deliverMedia(ctx, state, *m, state.Baseline); err != nil {
 					if !onlyMediaRetries(err) {
 						return err
 					}
 					pending = errors.Join(pending, err)
-					blocked = true
 				}
 			}
 		}
@@ -545,16 +581,17 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 				}
 				fingerprint, ok := messageFingerprint(m)
 				if full || !ok || c.delivered[m.ID] != fingerprint {
-					if err = c.deliver(ctx, state, m); err != nil {
+					if err = c.deliverMedia(ctx, state, m, after); err != nil {
 						if !onlyMediaRetries(err) {
 							return err
 						}
 						pending = errors.Join(pending, err)
-						blocked = true
+						if !full {
+							if err = c.advanceCursor(ctx, state, m.ID); err != nil {
+								return err
+							}
+						}
 						continue
-					}
-					if err = c.syncReactions(ctx, state, m); err != nil {
-						return err
 					}
 					if ok {
 						if _, exists := c.delivered[m.ID]; !exists {
@@ -567,7 +604,7 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 						c.delivered[m.ID] = fingerprint
 					}
 				}
-				if !full && !blocked {
+				if !full {
 					if err = c.advanceCursor(ctx, state, m.ID); err != nil {
 						return err
 					}
@@ -589,9 +626,6 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			return err
 		}
 	}
-	if pending != nil {
-		return pending
-	}
 	if full {
 		c.mu.Lock()
 		oldSynced, oldVersion := c.meta.ConfirmationsSynced, c.meta.ConfirmationVersion
@@ -608,7 +642,56 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			return err
 		}
 	}
+	return pending
+}
+func (c *Client) saveMediaRetry(ctx context.Context, state *RoomState, id, after, revision string, failed bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	old, exists := state.Media[id]
+	if !failed && !exists {
+		return nil
+	}
+	if state.Media == nil {
+		state.Media = make(map[string]MediaRetry)
+	}
+	if failed {
+		delay := min(max(old.Delay*2, 30*time.Second), 15*time.Minute)
+		start := old.Start
+		if !exists {
+			start = after
+		}
+		state.Media[id] = MediaRetry{Start: start, After: after, Revision: revision, Next: time.Now().Add(delay), Delay: delay}
+	} else {
+		delete(state.Media, id)
+	}
+	if err := c.login.Save(ctx); err != nil {
+		if exists {
+			state.Media[id] = old
+		} else {
+			delete(state.Media, id)
+		}
+		return err
+	}
 	return nil
+}
+func (c *Client) deliverMedia(ctx context.Context, state *RoomState, m chatgpt.Message, after string) error {
+	rev := revision(m)
+	if retry, exists := state.Media[m.ID]; exists && retry.Revision == rev && time.Now().Before(retry.Next) {
+		return mediaRetryError{errors.New("attachment retry scheduled")}
+	}
+	if retry, exists := state.Media[m.ID]; exists {
+		after = retry.After
+	}
+	err := c.deliver(ctx, state, m)
+	if err == nil {
+		err = c.syncReactions(ctx, state, m)
+	}
+	if err == nil || onlyMediaRetries(err) {
+		if saveErr := c.saveMediaRetry(ctx, state, m.ID, after, rev, err != nil); saveErr != nil {
+			return saveErr
+		}
+	}
+	return err
 }
 func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Message) error {
 	if m.ID == state.Baseline || m.Created.Before(state.Linked) {

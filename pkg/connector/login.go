@@ -44,15 +44,23 @@ type PendingSend struct {
 	BodyHash    string     `json:"body_hash"`
 }
 type RoomState struct {
-	Avatar      *bridgev2.Avatar `json:"-"`
-	Profile     chatgpt.Profile  `json:"profile"`
-	DotMember   string           `json:"dot_member"`
-	HumanMember string           `json:"human_member"`
-	HumanName   string           `json:"human_name,omitempty"`
-	Linked      time.Time        `json:"linked"`
-	Baseline    string           `json:"baseline"`
-	Cursor      string           `json:"cursor"`
-	Overlap     []string         `json:"overlap"`
+	Avatar      *bridgev2.Avatar      `json:"-"`
+	Profile     chatgpt.Profile       `json:"profile"`
+	DotMember   string                `json:"dot_member"`
+	HumanMember string                `json:"human_member"`
+	HumanName   string                `json:"human_name,omitempty"`
+	Linked      time.Time             `json:"linked"`
+	Baseline    string                `json:"baseline"`
+	Cursor      string                `json:"cursor"`
+	Overlap     []string              `json:"overlap"`
+	Media       map[string]MediaRetry `json:"media,omitempty"`
+}
+type MediaRetry struct {
+	Start    string        `json:"start"`
+	After    string        `json:"after"`
+	Revision string        `json:"revision"`
+	Next     time.Time     `json:"next"`
+	Delay    time.Duration `json:"delay"`
 }
 type MessageMetadata struct {
 	Confirmation  string                `json:"confirmation,omitempty"`
