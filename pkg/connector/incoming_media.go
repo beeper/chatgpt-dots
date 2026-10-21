@@ -104,9 +104,9 @@ func mappedAttachments(m chatgpt.Message, existing []*database.Message) []incomi
 	return attachments
 }
 
-func captionPart(attachments []incomingAttachment, existing []*database.Message) networkid.PartID {
+func captionPart(m chatgpt.Message, attachments []incomingAttachment, existing []*database.Message) networkid.PartID {
 	for _, part := range existing {
-		if md, ok := part.Metadata.(*MessageMetadata); ok && md.TextAnchor {
+		if md, ok := part.Metadata.(*MessageMetadata); ok && md.TextAnchor && (m.Content.Text != "" || m.Content.Elicitation != nil) {
 			return part.PartID
 		}
 	}
@@ -161,7 +161,7 @@ func expectedIncomingParts(m chatgpt.Message, existing []*database.Message) map[
 		for _, attachment := range attachments {
 			parts[attachment.PartID] = true
 		}
-		parts[captionPart(attachments, existing)] = true
+		parts[captionPart(m, attachments, existing)] = true
 	}
 	links := make(map[networkid.PartID]bool)
 	for _, attachment := range messageAttachments(m) {
@@ -215,7 +215,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 	}
 	result := &bridgev2.ConvertedMessage{}
 	attachments := mappedAttachments(m, existing)
-	caption := captionPart(attachments, existing)
+	caption := captionPart(m, attachments, existing)
 	if m.Deleted == nil && m.Content.Text == "" && m.Content.Elicitation == nil && len(attachments) == 0 {
 		return result, nil
 	}

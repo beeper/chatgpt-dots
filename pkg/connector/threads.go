@@ -70,7 +70,7 @@ func incomingRevisions(m chatgpt.Message, existing []*database.Message) map[netw
 		}
 		return result
 	}
-	caption := captionPart(attachments, existing)
+	caption := captionPart(m, attachments, existing)
 	for _, old := range existing {
 		if md, ok := old.Metadata.(*MessageMetadata); ok && md.TextAnchor && old.PartID == caption {
 			part := m
@@ -222,7 +222,7 @@ func (c *Client) saveMessageMetadata(ctx context.Context, m chatgpt.Message, par
 			for _, attachment := range attachments {
 				if attachment.PartID == part.PartID {
 					updated.Attachment = &attachment
-					updated.Caption = attachment.PartID == captionPart(attachments, parts)
+					updated.Caption = attachment.PartID == captionPart(m, attachments, parts)
 					break
 				}
 			}
