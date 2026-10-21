@@ -16,6 +16,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/status"
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
 
@@ -54,11 +55,15 @@ type RoomState struct {
 	Overlap     []string         `json:"overlap"`
 }
 type MessageMetadata struct {
-	Confirmation  string                `json:"confirmation,omitempty"`
-	OutgoingMedia bool                  `json:"outgoing_media,omitempty"`
-	TextAnchor    bool                  `json:"text_anchor,omitempty"`
-	Revision      string                `json:"revision"`
-	Thread        *chatgpt.ThreadStatus `json:"thread,omitempty"`
+	Attachment    *incomingAttachment        `json:"attachment,omitempty"`
+	Media         *event.MessageEventContent `json:"media,omitempty"`
+	Caption       bool                       `json:"caption,omitempty"`
+	Updated       time.Time                  `json:"updated,omitempty"`
+	Confirmation  string                     `json:"confirmation,omitempty"`
+	OutgoingMedia bool                       `json:"outgoing_media,omitempty"`
+	TextAnchor    bool                       `json:"text_anchor,omitempty"`
+	Revision      string                     `json:"revision"`
+	Thread        *chatgpt.ThreadStatus      `json:"thread,omitempty"`
 }
 type Login struct {
 	connector *Connector

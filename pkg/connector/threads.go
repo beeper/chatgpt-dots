@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -51,7 +53,40 @@ func threadBody(thread *chatgpt.ThreadStatus) string {
 }
 
 func incomingRevisions(m chatgpt.Message, existing []*database.Message) map[networkid.PartID]string {
-	return incomingRevisionsWithBase(m, existing, revision(m))
+	result := incomingRevisionsWithBase(m, existing, revision(m))
+	attachments := mappedAttachments(m, existing)
+	if m.Deleted != nil {
+		return result
+	}
+	expected := expectedIncomingParts(m, existing)
+	for _, old := range existing {
+		if md, ok := old.Metadata.(*MessageMetadata); ok && expected[old.PartID] {
+			result[old.PartID] = md.Revision
+		}
+	}
+	if len(attachments) == 0 {
+		if m.Content.Text != "" || m.Content.Elicitation != nil {
+			result[textPartID(m, existing)] = textRevision(m, revision(m))
+		}
+		return result
+	}
+	caption := captionPart(attachments, existing)
+	for _, attachment := range attachments {
+		part := m
+		raw, _ := json.Marshal(attachment)
+		part.Content.Attachments = []json.RawMessage{raw}
+		if attachment.PartID != caption {
+			part.Content.Text = ""
+			part.Content.Elicitation = nil
+		}
+		base := revision(part)
+		if attachment.Type == "thread" {
+			hash := sha256.Sum256([]byte(base + "\x00" + attachment.ThreadID + "\x00" + threadBody(m.Threads[attachment.ThreadID])))
+			base = hex.EncodeToString(hash[:])
+		}
+		result[attachment.PartID] = base
+	}
+	return result
 }
 
 func incomingRevisionsWithBase(m chatgpt.Message, existing []*database.Message, base string) map[networkid.PartID]string {
@@ -70,11 +105,11 @@ func incomingRevisionsWithBase(m chatgpt.Message, existing []*database.Message, 
 	return result
 }
 
-func (c *Client) prepareThreads(ctx context.Context, state *RoomState, m *chatgpt.Message) error {
+func (c *Client) prepareThreads(state *RoomState, m *chatgpt.Message, existing []*database.Message) {
 	key := state.Profile.Room + "\x00" + m.ID
 	refs := make(map[string]bool)
 	if m.Deleted == nil {
-		for _, attachment := range messageAttachments(*m) {
+		for _, attachment := range mappedAttachments(*m, existing) {
 			if attachment.Type == "thread" && attachment.ThreadID != "" {
 				refs[attachment.ThreadID] = true
 			}
@@ -82,7 +117,7 @@ func (c *Client) prepareThreads(ctx context.Context, state *RoomState, m *chatgp
 	}
 	if len(refs) == 0 {
 		delete(c.threadMessages, key)
-		return nil
+		return
 	}
 	if c.threadMessages == nil {
 		c.threadMessages = make(map[string]*threadMessage)
@@ -99,10 +134,6 @@ func (c *Client) prepareThreads(ctx context.Context, state *RoomState, m *chatgp
 		}
 		m.Threads[threadID] = watch.Message.Threads[threadID]
 	}
-	existing, err := c.connector.bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(m.ID))
-	if err != nil {
-		return err
-	}
 	for _, part := range existing {
 		md, ok := part.Metadata.(*MessageMetadata)
 		if ok && md.Thread != nil && refs[md.Thread.ID] && m.Threads[md.Thread.ID] == nil {
@@ -110,7 +141,6 @@ func (c *Client) prepareThreads(ctx context.Context, state *RoomState, m *chatgp
 		}
 	}
 	watch.Message = *m
-	return nil
 }
 
 func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error {
@@ -124,7 +154,11 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 		allTerminal, failed, changed := true, false, false
 		for threadID, previous := range watch.Message.Threads {
 			message.Threads[threadID] = previous
-			next, err := api.Thread(ctx, watch.Room.Profile.Room, message, threadID)
+			request := message
+			request.Content.Attachments = slices.Clone(message.Content.Attachments)
+			raw, _ := json.Marshal(incomingAttachment{Type: "thread", ThreadID: threadID})
+			request.Content.Attachments = append(request.Content.Attachments, raw)
+			next, err := api.Thread(ctx, watch.Room.Profile.Room, request, threadID)
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -168,18 +202,25 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 	return result
 }
 
-func (c *Client) saveThreadSnapshots(ctx context.Context, m chatgpt.Message, parts []*database.Message) error {
+func (c *Client) saveMessageMetadata(ctx context.Context, m chatgpt.Message, parts []*database.Message) error {
+	expected := expectedIncomingParts(m, parts)
 	for _, part := range parts {
 		md, ok := part.Metadata.(*MessageMetadata)
-		if !ok || md.Thread == nil {
-			continue
-		}
-		latest := m.Threads[md.Thread.ID]
-		if latest == nil || *latest == *md.Thread {
+		if !ok || !expected[part.PartID] {
 			continue
 		}
 		updated := *md
-		updated.Thread = latest
+		if m.Updated.After(updated.Updated) {
+			updated.Updated = m.Updated
+		}
+		if md.Thread != nil {
+			if latest := m.Threads[md.Thread.ID]; latest != nil {
+				updated.Thread = latest
+			}
+		}
+		if updated.Updated.Equal(md.Updated) && (updated.Thread == md.Thread || updated.Thread != nil && md.Thread != nil && *updated.Thread == *md.Thread) {
+			continue
+		}
 		part.Metadata = &updated
 		if err := c.connector.bridge.DB.Message.Update(ctx, part); err != nil {
 			return err

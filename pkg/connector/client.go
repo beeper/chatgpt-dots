@@ -592,9 +592,15 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	} else {
 		return errors.New("message from an unverified Dot room member")
 	}
-	if err := c.prepareThreads(ctx, state, &m); err != nil {
+	existing, err := c.connector.bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(m.ID))
+	if err != nil {
 		return err
 	}
+	if incomingStale(m, existing) {
+		return nil
+	}
+	c.prepareThreads(state, &m, existing)
+	var cleanup func() error
 	done := make(chan struct{}, 1)
 	meta := simplevent.EventMeta{Type: bridgev2.RemoteEventMessageUpsert, PortalKey: c.key(state), Sender: sender, Timestamp: m.Created, PostHandleFunc: func(context.Context, *bridgev2.Portal) {
 		select {
@@ -642,26 +648,23 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 				result.AddedParts.Parts = append(result.AddedParts.Parts, part)
 			}
 		}
-		expected := expectedIncomingParts(m, existing)
-		for _, old := range existing {
-			if !expected[old.PartID] {
-				// The pinned SDK deletes the mapping even when redaction fails.
-				// Keep it until both operations succeed so the next poll can retry.
-				_, err = intent.SendMessage(ctx, p.MXID, event.EventRedaction, &event.Content{Parsed: &event.RedactionEventContent{Redacts: old.MXID}}, &bridgev2.MatrixSendExtra{Timestamp: m.Updated})
-				if err != nil {
-					return nil, errors.New("Matrix attachment redaction failed; checkpoint retained")
-				}
-				if err = c.connector.bridge.DB.Message.Delete(ctx, old.RowID); err != nil {
-					return nil, err
-				}
-			}
-		}
 		return result, nil
 	}
-	msg.HandleExistingFunc = func(ctx context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (bridgev2.UpsertResult, error) {
-		if incomingDropsContent(m, existing) {
-			c.login.Log.Warn().Str("message_id", m.ID).Msg("ChatGPT returned a message without content that is already bridged; keeping the bridged parts")
-			return bridgev2.UpsertResult{}, nil
+	msg.HandleExistingFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (bridgev2.UpsertResult, error) {
+		cleanup = func() error {
+			expected := expectedIncomingParts(m, existing)
+			for _, old := range existing {
+				if !expected[old.PartID] {
+					_, err := intent.SendMessage(ctx, p.MXID, event.EventRedaction, &event.Content{Parsed: &event.RedactionEventContent{Redacts: old.MXID}}, &bridgev2.MatrixSendExtra{Timestamp: m.Updated})
+					if err != nil {
+						return errors.New("Matrix attachment redaction failed; checkpoint retained")
+					}
+					if err = c.connector.bridge.DB.Message.Delete(ctx, old.RowID); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
 		}
 		legacy := incomingRevisionsWithBase(m, existing, messageRevision(m, true))
 		current := incomingRevisions(m, existing)
@@ -705,10 +708,15 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	if err != nil {
 		return err
 	}
-	if !incomingSaved(m, saved) && !incomingDropsContent(m, saved) {
+	if !incomingSaved(m, saved) {
 		return errors.New("remote message parts not durably saved; checkpoint retained")
 	}
-	if err = c.saveThreadSnapshots(ctx, m, saved); err != nil {
+	if cleanup != nil {
+		if err = cleanup(); err != nil {
+			return err
+		}
+	}
+	if err = c.saveMessageMetadata(ctx, m, saved); err != nil {
 		return err
 	}
 	c.mu.Lock()
