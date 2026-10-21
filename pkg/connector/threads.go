@@ -71,6 +71,13 @@ func incomingRevisions(m chatgpt.Message, existing []*database.Message) map[netw
 		return result
 	}
 	caption := captionPart(attachments, existing)
+	for _, old := range existing {
+		if md, ok := old.Metadata.(*MessageMetadata); ok && md.TextAnchor && old.PartID == caption {
+			part := m
+			part.Content.Attachments = nil
+			result[caption] = textRevision(part, revision(part))
+		}
+	}
 	for _, attachment := range attachments {
 		part := m
 		raw, _ := json.Marshal(attachment)
@@ -204,12 +211,22 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 
 func (c *Client) saveMessageMetadata(ctx context.Context, m chatgpt.Message, parts []*database.Message) error {
 	expected := expectedIncomingParts(m, parts)
+	attachments := mappedAttachments(m, parts)
 	for _, part := range parts {
 		md, ok := part.Metadata.(*MessageMetadata)
 		if !ok || !expected[part.PartID] {
 			continue
 		}
 		updated := *md
+		if m.Deleted == nil && md.Attachment == nil {
+			for _, attachment := range attachments {
+				if attachment.PartID == part.PartID {
+					updated.Attachment = &attachment
+					updated.Caption = attachment.PartID == captionPart(attachments, parts)
+					break
+				}
+			}
+		}
 		if m.Updated.After(updated.Updated) {
 			updated.Updated = m.Updated
 		}
@@ -218,7 +235,7 @@ func (c *Client) saveMessageMetadata(ctx context.Context, m chatgpt.Message, par
 				updated.Thread = latest
 			}
 		}
-		if updated.Updated.Equal(md.Updated) && (updated.Thread == md.Thread || updated.Thread != nil && md.Thread != nil && *updated.Thread == *md.Thread) {
+		if updated.Attachment == md.Attachment && updated.Updated.Equal(md.Updated) && (updated.Thread == md.Thread || updated.Thread != nil && md.Thread != nil && *updated.Thread == *md.Thread) {
 			continue
 		}
 		part.Metadata = &updated

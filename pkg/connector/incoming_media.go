@@ -106,6 +106,11 @@ func mappedAttachments(m chatgpt.Message, existing []*database.Message) []incomi
 
 func captionPart(attachments []incomingAttachment, existing []*database.Message) networkid.PartID {
 	for _, part := range existing {
+		if md, ok := part.Metadata.(*MessageMetadata); ok && md.TextAnchor {
+			return part.PartID
+		}
+	}
+	for _, part := range existing {
 		if md, ok := part.Metadata.(*MessageMetadata); ok && md.Caption {
 			for _, attachment := range attachments {
 				if attachment.PartID == part.PartID {
@@ -156,6 +161,7 @@ func expectedIncomingParts(m chatgpt.Message, existing []*database.Message) map[
 		for _, attachment := range attachments {
 			parts[attachment.PartID] = true
 		}
+		parts[captionPart(attachments, existing)] = true
 	}
 	links := make(map[networkid.PartID]bool)
 	for _, attachment := range messageAttachments(m) {
@@ -218,7 +224,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 		if m.Deleted == nil && m.Sender == state.DotMember {
 			confirmation = m.Content.Elicitation.Definition()
 		}
-		result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Attachment: attachment, Media: media, Caption: attachment != nil && id == caption, Updated: m.Updated, Confirmation: confirmation, Revision: revisions[id], Thread: thread, TextAnchor: len(attachments) == 0 && m.Deleted == nil, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}})
+		result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Attachment: attachment, Media: media, Caption: attachment != nil && id == caption, Updated: m.Updated, Confirmation: confirmation, Revision: revisions[id], Thread: thread, TextAnchor: attachment == nil && m.Deleted == nil, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}})
 	}
 	text := confirmationText(m, c.connector.bridge.Config.CommandPrefix)
 	if m.Deleted != nil || len(attachments) == 0 {
@@ -234,6 +240,14 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			add(partID, content, nil, nil, nil)
 		}
 		return result, nil
+	}
+	if !current[caption] {
+		for _, old := range existing {
+			if md, ok := old.Metadata.(*MessageMetadata); ok && md.TextAnchor && old.PartID == caption {
+				add(caption, renderText(text), nil, nil, nil)
+				break
+			}
+		}
 	}
 	c.mu.RLock()
 	api := c.api
