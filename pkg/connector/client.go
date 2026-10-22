@@ -747,15 +747,18 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 			WithIsCertain(true).
 			WithSendNotice(true)
 	}
+	requestID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(string(c.login.ID)+"\x00"+string(msg.Event.ID))).String()
 	c.mu.RLock()
 	api := c.api
 	runContext := c.runContext
 	state := c.meta.Rooms[string(msg.Portal.ID)]
+	prior, hadPrior := c.meta.Pending[requestID]
 	c.mu.RUnlock()
+	certain := !hadPrior || prior.KnownUnsent
 	if api == nil || runContext == nil || runContext.Err() != nil || !c.connected.Load() {
 		return nil, bridgev2.WrapErrorInStatus(errors.New("not connected to ChatGPT")).
 			WithMessage("not connected to ChatGPT, try again in a moment").
-			WithIsCertain(true).
+			WithIsCertain(certain).
 			WithSendNotice(true)
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -763,21 +766,20 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	stop := context.AfterFunc(runContext, cancel)
 	defer stop()
 	if state == nil || msg.Portal.Receiver != c.login.ID {
-		return nil, relinkStatus(errors.New("refusing unverified Dot room"), true)
+		return nil, relinkStatus(errors.New("refusing unverified Dot room"), certain)
 	}
 	room, err := api.Verify(ctx, state.Profile)
 	if err != nil {
 		c.state(err)
-		return nil, wrapSendError(err, true)
+		return nil, wrapSendError(err, certain)
 	}
 	current, err := roomState(api, state.Profile, room)
 	if err != nil {
-		return nil, relinkStatus(err, true)
+		return nil, relinkStatus(err, certain)
 	}
 	if current.DotMember != state.DotMember || current.HumanMember != state.HumanMember {
-		return nil, relinkStatus(errors.New("dot room members changed; refusing send"), true)
+		return nil, relinkStatus(errors.New("dot room members changed; refusing send"), certain)
 	}
-	requestID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(string(c.login.ID)+"\x00"+string(msg.Event.ID))).String()
 	fingerprint := []byte(msg.Content.Body)
 	text := msg.Content.Body
 	if media {
