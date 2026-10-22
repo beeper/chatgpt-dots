@@ -65,6 +65,14 @@ type Profile struct {
 	Room   string `json:"messaging_room_id"`
 	Thread string `json:"active_root_thread_id"`
 }
+
+func (p Profile) DisplayName() string {
+	if name := strings.TrimSpace(p.Name); name != "" {
+		return name
+	}
+	return "Your dot"
+}
+
 type Message struct {
 	ID        string                   `json:"id"`
 	Created   time.Time                `json:"created_at"`

@@ -350,7 +350,12 @@ func (c *Client) refreshSelfAvatar(ctx context.Context, api *chatgpt.Client, sta
 	c.mu.Unlock()
 }
 func (c *Client) refreshDotAvatar(ctx context.Context, api *chatgpt.Client, state *RoomState) {
-	data, err := api.Avatar(ctx, state.Profile)
+	current, data, err := api.Avatar(ctx, state.Profile)
+	if current.ID == state.Profile.ID {
+		c.mu.Lock()
+		state.Profile.Name = current.Name
+		c.mu.Unlock()
+	}
 	if err != nil {
 		c.login.Log.Warn().Err(err).Msg("Could not update Dot avatar")
 		return
@@ -376,7 +381,7 @@ func (c *Client) GetUserID() networkid.UserID {
 func (c *Client) IsThisUser(_ context.Context, id networkid.UserID) bool { return id == c.GetUserID() }
 func (c *Client) chatInfo(s *RoomState) *bridgev2.ChatInfo {
 	dot := c.dotID(s)
-	return &bridgev2.ChatInfo{Name: ptr.Ptr(s.Profile.Name), Avatar: s.Avatar, Type: ptr.Ptr(database.RoomTypeDM), Members: &bridgev2.ChatMemberList{IsFull: true, TotalMemberCount: 2, OtherUserID: dot, Members: []bridgev2.ChatMember{{EventSender: bridgev2.EventSender{Sender: dot}, Membership: event.MembershipJoin, UserInfo: &bridgev2.UserInfo{Name: ptr.Ptr(s.Profile.Name), Avatar: s.Avatar, IsBot: ptr.Ptr(true)}}, {EventSender: bridgev2.EventSender{Sender: c.GetUserID(), SenderLogin: c.login.ID, IsFromMe: true}, Membership: event.MembershipJoin}}}}
+	return &bridgev2.ChatInfo{Name: ptr.Ptr(s.Profile.DisplayName()), Avatar: s.Avatar, Type: ptr.Ptr(database.RoomTypeDM), Members: &bridgev2.ChatMemberList{IsFull: true, TotalMemberCount: 2, OtherUserID: dot, Members: []bridgev2.ChatMember{{EventSender: bridgev2.EventSender{Sender: dot}, Membership: event.MembershipJoin, UserInfo: &bridgev2.UserInfo{Name: ptr.Ptr(s.Profile.DisplayName()), Avatar: s.Avatar, IsBot: ptr.Ptr(true)}}, {EventSender: bridgev2.EventSender{Sender: c.GetUserID(), SenderLogin: c.login.ID, IsFromMe: true}, Membership: event.MembershipJoin}}}}
 }
 func (c *Client) GetChatInfo(_ context.Context, p *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
 	c.mu.RLock()
@@ -399,7 +404,7 @@ func (c *Client) GetUserInfo(_ context.Context, g *bridgev2.Ghost) (*bridgev2.Us
 			return &bridgev2.UserInfo{Name: ptr.Ptr(name)}, nil
 		}
 		if c.dotID(s) == g.ID {
-			return &bridgev2.UserInfo{Name: ptr.Ptr(s.Profile.Name), Avatar: s.Avatar, IsBot: ptr.Ptr(true)}, nil
+			return &bridgev2.UserInfo{Name: ptr.Ptr(s.Profile.DisplayName()), Avatar: s.Avatar, IsBot: ptr.Ptr(true)}, nil
 		}
 	}
 	return nil, errors.New("unknown Dot contact")
