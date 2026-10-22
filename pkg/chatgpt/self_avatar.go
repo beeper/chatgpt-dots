@@ -41,7 +41,7 @@ func (c *Client) SelfAvatar(ctx context.Context, profile Profile) ([]byte, error
 		if member.Aeon == profile.ID && member.ID != "" {
 			dotFound = true
 		}
-		if member.ID == c.Identity.User && member.Aeon == "" {
+		if c.Identity.IsSelf(member.ID) && member.Aeon == "" {
 			selfCount++
 			if len(member.Avatar) == 0 || json.Unmarshal(member.Avatar, &avatarURL) != nil {
 				return nil, errors.New("own avatar field missing or invalid in Dot room")
