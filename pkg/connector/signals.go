@@ -132,7 +132,7 @@ func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *Ro
 	dot, human := false, false
 	for _, member := range room.Members {
 		dot = dot || (member.ID == state.DotMember && member.Aeon == state.Profile.ID)
-		human = human || (member.ID == state.HumanMember && member.Aeon == "" && member.ID == api.Identity.User)
+		human = human || (member.ID == state.HumanMember && member.Aeon == "" && api.Identity.IsSelf(member.ID))
 	}
 	if len(room.Members) != 2 || !dot || !human {
 		return nil, errors.New("Dot room signal members changed")

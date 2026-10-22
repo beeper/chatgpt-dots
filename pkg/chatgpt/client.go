@@ -21,8 +21,13 @@ type Credentials struct {
 }
 type Identity struct {
 	Account, User string
+	AccountUser   string
 	Email         string
 	Expires       time.Time
+}
+
+func (i Identity) IsSelf(member string) bool {
+	return member != "" && (member == i.User || member == i.AccountUser)
 }
 
 func (c Credentials) Identity() (Identity, error) {
@@ -38,8 +43,9 @@ func (c Credentials) Identity() (Identity, error) {
 	var claims struct {
 		Exp  int64 `json:"exp"`
 		Auth struct {
-			Account string `json:"chatgpt_account_id"`
-			User    string `json:"chatgpt_user_id"`
+			Account     string `json:"chatgpt_account_id"`
+			User        string `json:"chatgpt_user_id"`
+			AccountUser string `json:"chatgpt_account_user_id"`
 		} `json:"https://api.openai.com/auth"`
 		Profile struct {
 			Email string `json:"email"`
@@ -48,7 +54,7 @@ func (c Credentials) Identity() (Identity, error) {
 	if json.Unmarshal(data, &claims) != nil || claims.Auth.Account == "" || claims.Auth.User == "" || claims.Exp == 0 {
 		return out, errors.New("access token has no supported ChatGPT account identity")
 	}
-	out = Identity{Account: claims.Auth.Account, User: claims.Auth.User, Email: claims.Profile.Email, Expires: time.Unix(claims.Exp, 0)}
+	out = Identity{Account: claims.Auth.Account, User: claims.Auth.User, AccountUser: claims.Auth.AccountUser, Email: claims.Profile.Email, Expires: time.Unix(claims.Exp, 0)}
 	return out, nil
 }
 

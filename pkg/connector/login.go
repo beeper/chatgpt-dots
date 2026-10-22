@@ -290,7 +290,7 @@ func roomState(api *chatgpt.Client, p chatgpt.Profile, r *chatgpt.Room) (*RoomSt
 	if latest.IsZero() {
 		return nil, errors.New("baseline message lacks a timestamp; cannot establish safe history boundary")
 	}
-	if state.HumanMember != api.Identity.User {
+	if !api.Identity.IsSelf(state.HumanMember) {
 		return nil, errors.New("room human member does not match token user; workspace account-user mapping is not verified")
 	}
 	return state, nil
