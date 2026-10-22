@@ -789,7 +789,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 			return nil, errors.New("cannot fingerprint attachment content")
 		}
 		if msg.Content.Info != nil && msg.Content.Info.Size > chatgpt.MaxUploadSize {
-			return nil, bridgev2.ErrMediaTooLarge
+			return nil, errMediaTooLarge
 		}
 	}
 	hash := sha256.Sum256(fingerprint)

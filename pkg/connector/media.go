@@ -14,6 +14,8 @@ import (
 
 var errAttachmentTooLarge = errors.New("attachment exceeds the bridge-local 20 MiB limit")
 
+var errMediaTooLarge = fmt.Errorf("%w: the maximum is %d MiB", bridgev2.ErrMediaTooLarge, chatgpt.MaxUploadSize>>20)
+
 func (c *Client) downloadAttachment(ctx context.Context, content *event.MessageEventContent) ([]byte, error) {
 	var data []byte
 	err := c.connector.bridge.Bot.DownloadMediaToFile(ctx, content.URL, content.File, false, func(file *os.File) error {
@@ -34,7 +36,7 @@ func (c *Client) downloadAttachment(ctx context.Context, content *event.MessageE
 	case err == nil:
 		return data, nil
 	case errors.Is(err, errAttachmentTooLarge):
-		return nil, bridgev2.ErrMediaTooLarge
+		return nil, errMediaTooLarge
 	default:
 		return nil, fmt.Errorf("%w: %w", bridgev2.ErrMediaDownloadFailed, err)
 	}
