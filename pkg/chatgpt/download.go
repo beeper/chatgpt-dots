@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"io"
 	"mime"
@@ -21,6 +22,10 @@ const MaxDownloadSize = 20 << 20
 type AttachmentUnavailableError struct{ Reason string }
 
 func (e *AttachmentUnavailableError) Error() string { return e.Reason }
+
+type AttachmentStorageError struct{ Reason string }
+
+func (e *AttachmentStorageError) Error() string { return e.Reason }
 
 type FileData struct {
 	Name   string
@@ -68,21 +73,18 @@ func (c *Client) DownloadAttachment(ctx context.Context, room, fileID string) (*
 	req.Header.Set("User-Agent", "BeeperDotsBridge/0.1")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, errors.New("attachment storage download failed")
+		return nil, &AttachmentStorageError{Reason: "attachment storage download failed"}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		return nil, &AttachmentUnavailableError{Reason: "ChatGPT attachment is no longer available"}
-	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New("attachment storage denied the download")
+		return nil, &AttachmentStorageError{Reason: fmt.Sprintf("attachment storage denied the download (HTTP %d)", resp.StatusCode)}
 	}
 	if resp.ContentLength > MaxDownloadSize {
 		return nil, &AttachmentUnavailableError{Reason: "file exceeds the bridge-local 20 MiB limit"}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxDownloadSize+1))
 	if err != nil {
-		return nil, errors.New("attachment download interrupted")
+		return nil, &AttachmentStorageError{Reason: "attachment download interrupted"}
 	}
 	if len(data) > MaxDownloadSize {
 		return nil, &AttachmentUnavailableError{Reason: "file exceeds the bridge-local 20 MiB limit"}

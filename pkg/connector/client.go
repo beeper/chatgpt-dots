@@ -211,10 +211,7 @@ func (c *Client) run(ctx context.Context) {
 				nextPoll = time.Now().Add(livePollInterval)
 			}
 		}
-		threadErr := c.refreshThreads(ctx, api)
-		if err == nil {
-			err = threadErr
-		}
+		err = errors.Join(err, c.refreshThreads(ctx, api))
 		if !time.Now().Before(nextProfileRefresh) {
 			avatars := !time.Now().Before(nextAvatarRefresh)
 			if avatars {
@@ -234,7 +231,7 @@ func (c *Client) run(ctx context.Context) {
 				err = errors.Join(err, proxyErr)
 			}
 		}
-		if err != nil {
+		if err != nil && !onlyMediaRetries(err) {
 			if ctx.Err() != nil {
 				return
 			}
@@ -244,6 +241,9 @@ func (c *Client) run(ctx context.Context) {
 			delay = min(delay*2, time.Minute)
 			nextPoll = time.Time{}
 		} else {
+			if err != nil {
+				c.login.Log.Debug().Err(err).Msg("Waiting to retry a ChatGPT attachment download")
+			}
 			c.connected.Store(true)
 			c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 			delay = pollInterval
@@ -481,18 +481,70 @@ func (c *Client) advanceCursor(ctx context.Context, state *RoomState, id string)
 	return nil
 }
 func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
-	full := c.rescan.Swap(false) || !c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion
+	full := c.rescan.Swap(false) || c.meta.Rescan || !c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion
 	if full {
-		defer func() {
+		if !c.meta.Rescan {
+			c.mu.Lock()
+			c.meta.Rescan = true
+			err = c.login.Save(ctx)
 			if err != nil {
+				c.meta.Rescan = false
+			}
+			c.mu.Unlock()
+			if err != nil {
+				c.rescan.Store(true)
+				return err
+			}
+		}
+		defer func() {
+			if err != nil && !onlyMediaRetries(err) {
 				c.rescan.Store(true)
 			}
 		}()
 	}
+	var pending error
 	for _, state := range c.meta.Rooms {
 		receipt, err := c.readReceipt(ctx, api, state)
 		if err != nil {
 			return err
+		}
+		for id, retry := range state.Media {
+			if time.Now().Before(retry.Next) {
+				continue
+			}
+			page, err := api.Messages(ctx, state.Profile.Room, retry.After)
+			if err != nil {
+				return err
+			}
+			var m *chatgpt.Message
+			for i := range page.Items {
+				if page.Items[i].ID == id {
+					m = &page.Items[i]
+					break
+				}
+			}
+			if m == nil {
+				next := retry.Start
+				if page.Next != "" {
+					next = page.Next
+				} else if len(page.Items) >= 32 {
+					sort.SliceStable(page.Items, func(i, j int) bool { return page.Items[i].Created.Before(page.Items[j].Created) })
+					next = page.Items[len(page.Items)-1].ID
+				}
+				if err = c.saveMediaRetry(ctx, state, id, next, retry.Revision, true); err != nil {
+					return err
+				}
+				continue
+			}
+			if m.Created.IsZero() {
+				return errors.New("provider message missing timestamp")
+			}
+			if err = c.deliverMedia(ctx, state, *m, retry.After); err != nil {
+				if !onlyMediaRetries(err) {
+					return err
+				}
+				pending = errors.Join(pending, err)
+			}
 		}
 		c.mu.RLock()
 		var pendingIDs []string
@@ -508,8 +560,11 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 				return err
 			}
 			if m != nil {
-				if err = c.deliver(ctx, state, *m); err != nil {
-					return err
+				if err = c.deliverMedia(ctx, state, *m, state.Baseline); err != nil {
+					if !onlyMediaRetries(err) {
+						return err
+					}
+					pending = errors.Join(pending, err)
 				}
 			}
 		}
@@ -540,11 +595,17 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 				}
 				fingerprint, ok := messageFingerprint(m)
 				if full || !ok || c.delivered[m.ID] != fingerprint {
-					if err = c.deliver(ctx, state, m); err != nil {
-						return err
-					}
-					if err = c.syncReactions(ctx, state, m); err != nil {
-						return err
+					if err = c.deliverMedia(ctx, state, m, after); err != nil {
+						if !onlyMediaRetries(err) {
+							return err
+						}
+						pending = errors.Join(pending, err)
+						if !full {
+							if err = c.advanceCursor(ctx, state, m.ID); err != nil {
+								return err
+							}
+						}
+						continue
 					}
 					if ok {
 						if _, exists := c.delivered[m.ID]; !exists {
@@ -579,21 +640,77 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			return err
 		}
 	}
-	if full && (!c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion) {
+	if full {
 		c.mu.Lock()
 		oldSynced, oldVersion := c.meta.ConfirmationsSynced, c.meta.ConfirmationVersion
 		c.meta.ConfirmationsSynced = true
+		c.meta.Rescan = false
 		c.meta.ConfirmationVersion = confirmationRenderingVersion
 		err = c.login.Save(ctx)
 		if err != nil {
 			c.meta.ConfirmationsSynced, c.meta.ConfirmationVersion = oldSynced, oldVersion
+			c.meta.Rescan = true
 		}
 		c.mu.Unlock()
 		if err != nil {
 			return err
 		}
 	}
+	return pending
+}
+func (c *Client) saveMediaRetry(ctx context.Context, state *RoomState, id, after, revision string, failed bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	old, exists := state.Media[id]
+	if !failed && !exists {
+		return nil
+	}
+	if state.Media == nil {
+		state.Media = make(map[string]MediaRetry)
+	}
+	if failed {
+		delay := min(max(old.Delay*2, 30*time.Second), 15*time.Minute)
+		next := time.Now().Add(delay)
+		if exists && after != old.After && after != old.Start {
+			delay = max(old.Delay, 30*time.Second)
+			next = time.Now().Add(30 * time.Second)
+		}
+		start := old.Start
+		if !exists {
+			start = after
+		}
+		state.Media[id] = MediaRetry{Start: start, After: after, Revision: revision, Next: next, Delay: delay}
+	} else {
+		delete(state.Media, id)
+	}
+	if err := c.login.Save(ctx); err != nil {
+		if exists {
+			state.Media[id] = old
+		} else {
+			delete(state.Media, id)
+		}
+		return err
+	}
 	return nil
+}
+func (c *Client) deliverMedia(ctx context.Context, state *RoomState, m chatgpt.Message, after string) error {
+	rev := revision(m)
+	if retry, exists := state.Media[m.ID]; exists && retry.Revision == rev && time.Now().Before(retry.Next) {
+		return mediaRetryError{errors.New("attachment retry scheduled")}
+	}
+	if retry, exists := state.Media[m.ID]; exists {
+		after = retry.After
+	}
+	err := c.deliver(ctx, state, m)
+	if err == nil {
+		err = c.syncReactions(ctx, state, m)
+	}
+	if err == nil || onlyMediaRetries(err) {
+		if saveErr := c.saveMediaRetry(ctx, state, m.ID, after, rev, err != nil); saveErr != nil {
+			return saveErr
+		}
+	}
+	return err
 }
 func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Message) error {
 	if m.ID == state.Baseline || m.Created.Before(state.Linked) {
@@ -633,11 +750,15 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		original := &bridgev2.MatrixMessage{MatrixEventBase: bridgev2.MatrixEventBase[*event.MessageEventContent]{Portal: p, Event: &event.Event{ID: pending.EventID, RoomID: p.MXID, Sender: pending.Sender, Timestamp: pending.Timestamp, Type: event.EventMessage}}}
 		original.AddPendingToSave(&database.Message{SenderID: c.GetUserID(), Metadata: &MessageMetadata{Revision: revision(m), OutgoingMedia: pending.Media}}, networkid.TransactionID(m.RequestID), nil)
 	}
+	var conversionErr error
 	msg.ConvertMessageFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, _ chatgpt.Message) (*bridgev2.ConvertedMessage, error) {
-		return c.convertIncoming(ctx, state, p, intent, m, nil)
+		converted, err := c.convertIncoming(ctx, state, p, intent, m, nil)
+		conversionErr = err
+		return converted, err
 	}
 	msg.ConvertEditFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
 		converted, err := c.convertIncoming(ctx, state, p, intent, m, existing)
+		conversionErr = err
 		if err != nil {
 			return nil, err
 		}
@@ -703,14 +824,30 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		}
 		return bridgev2.UpsertResult{SubEvents: []bridgev2.RemoteEvent{&edit}}, nil
 	}
+	conversionFailure := func() error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var storage *chatgpt.AttachmentStorageError
+		if errors.As(conversionErr, &storage) {
+			return mediaRetryError{storage}
+		}
+		return conversionErr
+	}
 	result := c.login.QueueRemoteEvent(msg)
 	if !result.Success || result.Ignored {
+		if err := conversionFailure(); err != nil {
+			return err
+		}
 		return errors.New("bridge could not queue remote message; checkpoint retained")
 	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-done:
+	}
+	if err := conversionFailure(); err != nil {
+		return err
 	}
 	saved, err := c.connector.bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(m.ID))
 	if err != nil {

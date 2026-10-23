@@ -116,6 +116,9 @@ func (c *Client) prepareThreads(ctx context.Context, state *RoomState, m *chatgp
 func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error {
 	var result error
 	for key, watch := range c.threadMessages {
+		if _, pending := watch.Room.Media[watch.Message.ID]; pending {
+			continue
+		}
 		if time.Now().Before(watch.NextRefresh) {
 			continue
 		}
@@ -144,7 +147,7 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 			allTerminal = allTerminal && next.Terminal()
 		}
 		watch.Message = message
-		if err := c.deliver(ctx, watch.Room, message); err != nil {
+		if err := c.deliverMedia(ctx, watch.Room, message, watch.Room.Baseline); err != nil {
 			result = errors.Join(result, err)
 			watch.NextRefresh = time.Now().Add(3 * time.Second)
 			continue

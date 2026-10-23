@@ -175,7 +175,13 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			content, err = incomingFile(ctx, api, state, portal, intent, attachment.FileID)
 			if err != nil {
 				var unavailable *chatgpt.AttachmentUnavailableError
-				if !errors.As(err, &unavailable) || ctx.Err() != nil {
+				var storage *chatgpt.AttachmentStorageError
+				if ctx.Err() != nil {
+					return nil, err
+				}
+				if errors.As(err, &storage) {
+					return nil, fmt.Errorf("%w: %w", bridgev2.ErrIgnoringRemoteEvent, err)
+				} else if !errors.As(err, &unavailable) {
 					return nil, err
 				}
 				content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "[ChatGPT attachment unavailable: " + unavailable.Reason + "]"}
@@ -230,4 +236,25 @@ func incomingFile(ctx context.Context, api *chatgpt.Client, state *RoomState, po
 		return nil, errors.New("Matrix attachment upload failed; checkpoint retained")
 	}
 	return content, nil
+}
+
+type mediaRetryError struct{ error }
+
+func (e mediaRetryError) Error() string {
+	return "ChatGPT attachment download failed; checkpoint retained for retry: " + e.error.Error()
+}
+
+func (e mediaRetryError) Unwrap() error { return e.error }
+
+func onlyMediaRetries(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, member := range joined.Unwrap() {
+			if member != nil && !onlyMediaRetries(member) {
+				return false
+			}
+		}
+		return true
+	}
+	_, ok := err.(mediaRetryError)
+	return ok
 }
