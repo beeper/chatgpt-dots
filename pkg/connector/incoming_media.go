@@ -22,11 +22,11 @@ import (
 )
 
 type incomingAttachment struct {
-	Type         string `json:"type"`
-	FileID       string `json:"file_id"`
-	AttachmentID string `json:"attachment_id"`
-	ThreadID     string `json:"thread_id"`
-	PartID       networkid.PartID
+	Type         string           `json:"type"`
+	FileID       string           `json:"file_id"`
+	AttachmentID string           `json:"attachment_id"`
+	ThreadID     string           `json:"thread_id"`
+	PartID       networkid.PartID `json:"-"`
 }
 
 func messageAttachments(m chatgpt.Message) []incomingAttachment {
@@ -62,20 +62,72 @@ func outgoingMediaAnchor(existing []*database.Message) bool {
 
 func mappedAttachments(m chatgpt.Message, existing []*database.Message) []incomingAttachment {
 	var attachments []incomingAttachment
+	seen := make(map[networkid.PartID]bool)
 	for _, attachment := range messageAttachments(m) {
 		if attachment.Type != "link" {
 			attachments = append(attachments, attachment)
+			seen[attachment.PartID] = true
 		}
 	}
-	if len(attachments) > 0 && outgoingMediaAnchor(existing) {
-		attachments[0].PartID = ""
+	for _, part := range existing {
+		md, ok := part.Metadata.(*MessageMetadata)
+		if !ok || !md.OutgoingMedia || part.PartID != "" {
+			continue
+		}
+		for i, attachment := range attachments {
+			if md.Attachment == nil || attachment.Type == md.Attachment.Type && (attachment.AttachmentID != "" && attachment.AttachmentID == md.Attachment.AttachmentID || attachment.AttachmentID == "" && attachment.FileID == md.Attachment.FileID) {
+				attachments[i].PartID = ""
+				seen[""] = true
+				break
+			}
+		}
+	}
+	if m.Deleted == nil {
+		for _, part := range existing {
+			md, ok := part.Metadata.(*MessageMetadata)
+			if !ok || seen[part.PartID] {
+				continue
+			}
+			var attachment incomingAttachment
+			if md.Attachment != nil {
+				attachment = *md.Attachment
+			} else if md.Thread != nil {
+				attachment = incomingAttachment{Type: "thread", ThreadID: md.Thread.ID}
+			} else {
+				continue
+			}
+			attachment.PartID = part.PartID
+			attachments = append(attachments, attachment)
+			seen[part.PartID] = true
+		}
 	}
 	return attachments
 }
 
+func captionPart(m chatgpt.Message, attachments []incomingAttachment, existing []*database.Message) networkid.PartID {
+	for _, part := range existing {
+		if md, ok := part.Metadata.(*MessageMetadata); ok && md.TextAnchor && (m.Content.Text != "" || m.Content.Elicitation != nil) {
+			return part.PartID
+		}
+	}
+	for _, part := range existing {
+		if md, ok := part.Metadata.(*MessageMetadata); ok && md.Caption {
+			for _, attachment := range attachments {
+				if attachment.PartID == part.PartID {
+					return part.PartID
+				}
+			}
+		}
+	}
+	if len(attachments) > 0 {
+		return attachments[0].PartID
+	}
+	return ""
+}
+
 func textPartID(m chatgpt.Message, existing []*database.Message) networkid.PartID {
 	for _, part := range existing {
-		if md, ok := part.Metadata.(*MessageMetadata); part.PartID == "" || ok && md.TextAnchor {
+		if md, ok := part.Metadata.(*MessageMetadata); ok && md.TextAnchor || part.PartID == "" && (!ok || !md.OutgoingMedia) {
 			return part.PartID
 		}
 	}
@@ -88,6 +140,9 @@ func textPartID(m chatgpt.Message, existing []*database.Message) networkid.PartI
 			}
 		}
 	}
+	if outgoingMediaAnchor(existing) {
+		return "caption"
+	}
 	return ""
 }
 
@@ -96,7 +151,9 @@ func expectedIncomingParts(m chatgpt.Message, existing []*database.Message) map[
 	attachments := mappedAttachments(m, existing)
 	if m.Deleted != nil {
 		parts["deleted"] = true
-	} else if len(attachments) == 0 {
+		return parts
+	}
+	if len(attachments) == 0 {
 		if m.Content.Text != "" || m.Content.Elicitation != nil {
 			parts[textPartID(m, existing)] = true
 		}
@@ -104,18 +161,43 @@ func expectedIncomingParts(m chatgpt.Message, existing []*database.Message) map[
 		for _, attachment := range attachments {
 			parts[attachment.PartID] = true
 		}
+		parts[captionPart(m, attachments, existing)] = true
+	}
+	links := make(map[networkid.PartID]bool)
+	for _, attachment := range messageAttachments(m) {
+		if attachment.Type == "link" {
+			links[attachment.PartID] = true
+		}
+	}
+	for _, part := range existing {
+		if md, ok := part.Metadata.(*MessageMetadata); ok && (md.OutgoingMedia || !md.TextAnchor && strings.HasPrefix(string(part.PartID), "attachment-") && !links[part.PartID]) {
+			parts[part.PartID] = true
+		}
 	}
 	return parts
 }
 
+func incomingStale(m chatgpt.Message, existing []*database.Message) bool {
+	for _, part := range existing {
+		if part.PartID == "deleted" && m.Deleted == nil {
+			return true
+		}
+		if md, ok := part.Metadata.(*MessageMetadata); ok && !m.Updated.IsZero() && md.Updated.After(m.Updated) {
+			return true
+		}
+	}
+	return false
+}
+
 func incomingSaved(m chatgpt.Message, existing []*database.Message) bool {
 	expected := incomingRevisions(m, existing)
-	if len(existing) != len(expected) {
-		return false
-	}
 	for _, part := range existing {
+		revision, wanted := expected[part.PartID]
+		if !wanted {
+			continue
+		}
 		md, ok := part.Metadata.(*MessageMetadata)
-		if !ok || md.Revision != expected[part.PartID] {
+		if !ok || md.Revision != revision {
 			return false
 		}
 		delete(expected, part.PartID)
@@ -133,15 +215,16 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 	}
 	result := &bridgev2.ConvertedMessage{}
 	attachments := mappedAttachments(m, existing)
+	caption := captionPart(m, attachments, existing)
 	if m.Deleted == nil && m.Content.Text == "" && m.Content.Elicitation == nil && len(attachments) == 0 {
 		return result, nil
 	}
-	add := func(id networkid.PartID, content *event.MessageEventContent, thread *chatgpt.ThreadStatus) {
+	add := func(id networkid.PartID, content *event.MessageEventContent, thread *chatgpt.ThreadStatus, attachment *incomingAttachment, media *event.MessageEventContent) {
 		confirmation := ""
 		if m.Deleted == nil && m.Sender == state.DotMember {
 			confirmation = m.Content.Elicitation.Definition()
 		}
-		result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Confirmation: confirmation, Revision: revisions[id], Thread: thread, TextAnchor: len(attachments) == 0 && m.Deleted == nil, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}})
+		result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Attachment: attachment, Media: media, Caption: attachment != nil && id == caption, Updated: m.Updated, Confirmation: confirmation, Revision: revisions[id], Thread: thread, TextAnchor: attachment == nil && m.Deleted == nil, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}})
 	}
 	text := confirmationText(m, c.connector.bridge.Config.CommandPrefix)
 	if m.Deleted != nil || len(attachments) == 0 {
@@ -154,9 +237,17 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			if m.Deleted != nil {
 				content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "[Message deleted in ChatGPT]"}
 			}
-			add(partID, content, nil)
+			add(partID, content, nil, nil, nil)
 		}
 		return result, nil
+	}
+	if !current[caption] {
+		for _, old := range existing {
+			if md, ok := old.Metadata.(*MessageMetadata); ok && md.TextAnchor && old.PartID == caption {
+				add(caption, renderText(text), nil, nil, nil)
+				break
+			}
+		}
 	}
 	c.mu.RLock()
 	api := c.api
@@ -164,15 +255,26 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 	if api == nil || ctx.Err() != nil {
 		return nil, errors.New("ChatGPT connection unavailable for attachment download")
 	}
-	for i, attachment := range attachments {
+	for _, attachment := range attachments {
 		if current[attachment.PartID] {
 			continue
 		}
 		content := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "[Unsupported ChatGPT attachment]"}
 		var thread *chatgpt.ThreadStatus
+		var media *event.MessageEventContent
 		if attachment.Type == "file" {
 			var err error
-			content, err = incomingFile(ctx, api, state, portal, intent, attachment.FileID)
+			for _, old := range existing {
+				if md, ok := old.Metadata.(*MessageMetadata); ok && old.PartID == attachment.PartID && md.Attachment != nil && md.Attachment.FileID == attachment.FileID && md.Media != nil {
+					cached := *md.Media
+					content = &cached
+					media = md.Media
+					break
+				}
+			}
+			if media == nil {
+				content, err = incomingFile(ctx, api, state, portal, intent, attachment.FileID)
+			}
 			if err != nil {
 				var unavailable *chatgpt.AttachmentUnavailableError
 				var storage *chatgpt.AttachmentStorageError
@@ -186,14 +288,18 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 				}
 				content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "[ChatGPT attachment unavailable: " + unavailable.Reason + "]"}
 			}
+			if err == nil && media == nil {
+				cached := *content
+				media = &cached
+			}
 		} else if attachment.Type == "thread" {
 			thread = m.Threads[attachment.ThreadID]
 			content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: threadBody(thread)}
 		}
-		if i == 0 && text != "" {
+		if attachment.PartID == caption && text != "" {
 			applyCaption(content, text)
 		}
-		add(attachment.PartID, content, thread)
+		add(attachment.PartID, content, thread, &attachment, media)
 	}
 	return result, nil
 }
