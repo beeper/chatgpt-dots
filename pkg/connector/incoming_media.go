@@ -214,6 +214,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 		}
 	}
 	result := &bridgev2.ConvertedMessage{}
+	nativeReply(m, result)
 	attachments := mappedAttachments(m, existing)
 	caption := captionPart(m, attachments, existing)
 	if m.Deleted == nil && m.Content.Text == "" && m.Content.Elicitation == nil && len(attachments) == 0 {

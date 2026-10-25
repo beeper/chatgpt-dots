@@ -43,6 +43,13 @@ Delivery is synchronous, with checkpoints saved after all parts are persisted.
 Retries reuse completed parts. Outgoing request IDs derive from Matrix events,
 allowing uncertain sends to be checked before retrying.
 
+Native `reply_to.message_id` and `reply_root_message_id` become Matrix reply and
+thread relationships. Outgoing replies send only the native parent message ID;
+ChatGPT determines the reply root. Replies can include text or media and target
+either participant's messages. Retry reservations include the reply target, and
+an uncertain reply is reconciled through the native reply history before another
+send is attempted. Targets must belong to the same bridged account and room.
+
 Text is rendered as safe Matrix HTML. Media uses native room uploads and Matrix
 media transfer, with a 20 MiB bridge limit. Task attachments become cards whose
 title and status update in place, not Matrix threads. Cards refresh every few
@@ -56,7 +63,17 @@ The native WebSocket supplies typing heartbeats and triggers reconciliation for
 verified Dot rooms. Typing expires rather than being replayed after reconnect.
 Read receipts use the Dot's native read cursor and timestamp, not inferred
 activity. Reaction snapshots reconcile independently of message content.
-These signals are incoming-only.
+Typing and read receipts are incoming-only. Both participants' reactions are
+synced, including the owner's reactions made in ChatGPT. The native protocol
+allows one emoji per participant per message: adding another replaces it, and
+removing it uses the native reaction DELETE endpoint. Before removing a reaction,
+the bridge checks that it still matches the native one, so removing an older
+Matrix reaction does not clear an already-observed replacement.
+
+Reply and reaction request shapes follow the native web client's
+[messaging implementation](https://chatgpt.com/cdn/assets/async/963553.432cebca7f.js),
+inspected on October 25, 2026. The emoji picker accepts emoji beyond its quick
+suggestions; the bridge does not restrict reactions to that suggestion list.
 
 ## Confirmations
 

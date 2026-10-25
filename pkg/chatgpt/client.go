@@ -74,15 +74,17 @@ func (p Profile) DisplayName() string {
 }
 
 type Message struct {
-	ID        string                   `json:"id"`
-	Created   time.Time                `json:"created_at"`
-	Updated   time.Time                `json:"updated_at"`
-	Sender    string                   `json:"account_user_id"`
-	RequestID string                   `json:"request_id"`
-	Deleted   *time.Time               `json:"deleted_at"`
-	Threads   map[string]*ThreadStatus `json:"-"`
-	Reactions map[string]string        `json:"reactions"`
-	Content   struct {
+	ID                 string                   `json:"id"`
+	Created            time.Time                `json:"created_at"`
+	Updated            time.Time                `json:"updated_at"`
+	Sender             string                   `json:"account_user_id"`
+	RequestID          string                   `json:"request_id"`
+	Deleted            *time.Time               `json:"deleted_at"`
+	Threads            map[string]*ThreadStatus `json:"-"`
+	Reactions          map[string]string        `json:"reactions"`
+	ReplyTo            *ReplyTarget             `json:"reply_to,omitempty"`
+	ReplyRootMessageID string                   `json:"reply_root_message_id,omitempty"`
+	Content            struct {
 		Text        string            `json:"text"`
 		Attachments []json.RawMessage `json:"attachments"`
 		Elicitation *Elicitation      `json:"elicitation,omitempty"`
@@ -227,6 +229,9 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 		}
 		return failure
 	}
+	if out == nil {
+		return nil
+	}
 	if err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out); err != nil {
 		return errors.New("unexpected ChatGPT response schema")
 	}
@@ -362,7 +367,7 @@ func (c *Client) Messages(ctx context.Context, room, after string) (*Page, error
 	err := c.do(ctx, "GET", "/messaging/rooms/"+url.PathEscape(room)+"/messages?"+query.Encode(), nil, &page)
 	return &page, err
 }
-func (c *Client) Send(ctx context.Context, room, text, requestID string, attachments []FileReference) (*Message, error) {
+func (c *Client) Send(ctx context.Context, room, text, requestID string, attachments []FileReference, replyTo string) (*Message, error) {
 	c.mu.RLock()
 	verified := c.rooms[room]
 	c.mu.RUnlock()
@@ -374,11 +379,15 @@ func (c *Client) Send(ctx context.Context, room, text, requestID string, attachm
 			Text        string          `json:"text"`
 			Attachments []FileReference `json:"attachments,omitempty"`
 		} `json:"content"`
-		Request     string `json:"request_id"`
-		Idempotency string `json:"idempotency_token"`
+		Request     string       `json:"request_id"`
+		Idempotency string       `json:"idempotency_token"`
+		ReplyTo     *ReplyTarget `json:"reply_to,omitempty"`
 	}{Request: requestID, Idempotency: requestID}
 	body.Content.Text = text
 	body.Content.Attachments = attachments
+	if replyTo != "" {
+		body.ReplyTo = &ReplyTarget{MessageID: replyTo}
+	}
 	var m Message
 	err := c.do(ctx, "POST", "/messaging/rooms/"+url.PathEscape(room)+"/messages", body, &m)
 	if err == nil && (m.ID == "" || m.RequestID != requestID) {
