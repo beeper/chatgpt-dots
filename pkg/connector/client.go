@@ -446,10 +446,6 @@ func messageRevision(m chatgpt.Message, includeUpdateTime bool) string {
 		}
 	}
 	encoded, _ := json.Marshal(attachments)
-	if m.ReplyTo != nil || m.ReplyRootMessageID != "" {
-		relationship, _ := json.Marshal([]any{m.ReplyTo, m.ReplyRootMessageID})
-		encoded = append(append(encoded, '\x00'), relationship...)
-	}
 	if m.Content.Elicitation != nil {
 		confirmation, _ := json.Marshal(m.Content.Elicitation)
 		encoded = append(append(encoded, '\x00'), confirmation...)
