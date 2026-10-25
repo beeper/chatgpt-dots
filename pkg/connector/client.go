@@ -420,13 +420,13 @@ func (c *Client) GetUserInfo(_ context.Context, g *bridgev2.Ghost) (*bridgev2.Us
 	return nil, errors.New("unknown Dot contact")
 }
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
-	return &event.RoomFeatures{ID: "chatgpt-dots.confirmations.v1", ReadReceipts: true, TypingNotifications: true, File: event.FileFeatureMap{
+	return &event.RoomFeatures{ID: "chatgpt-dots.replies-reactions.v1", ReadReceipts: true, TypingNotifications: true, ReactionCount: 1, File: event.FileFeatureMap{
 		"m.image":         {MimeTypes: map[string]event.CapabilitySupportLevel{"image/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.file":          {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.audio":         {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
 		"m.video":         {MimeTypes: map[string]event.CapabilitySupportLevel{"video/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		event.CapMsgVoice: {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
-	}, Reply: event.CapLevelRejected, Thread: event.CapLevelRejected, Edit: event.CapLevelRejected, Delete: event.CapLevelRejected, Reaction: event.CapLevelRejected, Poll: event.CapLevelRejected, LocationMessage: event.CapLevelRejected}
+	}, Reply: event.CapLevelFullySupported, Thread: event.CapLevelFullySupported, Edit: event.CapLevelRejected, Delete: event.CapLevelRejected, Reaction: event.CapLevelFullySupported, Poll: event.CapLevelRejected, LocationMessage: event.CapLevelRejected}
 }
 func revision(m chatgpt.Message) string {
 	return messageRevision(m, false)
@@ -768,7 +768,9 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		if err != nil {
 			return nil, err
 		}
-		result := &bridgev2.ConvertedEdit{AddedParts: &bridgev2.ConvertedMessage{}}
+		addedParts := *converted
+		addedParts.Parts = nil
+		result := &bridgev2.ConvertedEdit{AddedParts: &addedParts}
 		byID := make(map[networkid.PartID]*database.Message, len(existing))
 		for _, part := range existing {
 			byID[part.PartID] = part
@@ -893,9 +895,10 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	if !media && (msg.Content.MsgType != event.MsgText || msg.Content.Body == "") {
 		return nil, bridgev2.ErrUnsupportedMessageType
 	}
-	if msg.ReplyTo != nil || msg.ThreadRoot != nil {
-		return nil, bridgev2.WrapErrorInStatus(errors.New("replies and threads are not supported")).
-			WithMessage("replies and threads aren't supported, send a standalone message").
+	replyTo, err := c.matrixReplyTarget(msg)
+	if err != nil {
+		return nil, bridgev2.WrapErrorInStatus(err).
+			WithMessage("this reply target isn't available in this ChatGPT chat").
 			WithErrorReason(event.MessageStatusUnsupported).
 			WithStatus(event.MessageStatusFail).
 			WithIsCertain(true).
@@ -946,6 +949,9 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 			return nil, errMediaTooLarge
 		}
 	}
+	if replyTo != "" {
+		fingerprint = append(append(fingerprint, '\x00'), []byte(replyTo)...)
+	}
 	hash := sha256.Sum256(fingerprint)
 	bodyHash := hex.EncodeToString(hash[:])
 	c.mu.Lock()
@@ -954,7 +960,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	}
 	pending, retry := c.meta.Pending[requestID]
 	wasUncertain := retry && !pending.KnownUnsent
-	if retry && (pending.BodyHash != bodyHash || pending.Room != state.Profile.Room || pending.EventID != msg.Event.ID || pending.Media != media) {
+	if retry && (pending.BodyHash != bodyHash || pending.Room != state.Profile.Room || pending.EventID != msg.Event.ID || pending.Media != media || pending.ReplyTo != replyTo) {
 		c.mu.Unlock()
 		return nil, bridgev2.WrapErrorInStatus(errors.New("retry content differs from the original request; refusing to reuse its request ID")).
 			WithMessage("this retry doesn't match the original message, so it can't be sent").
@@ -963,7 +969,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 			WithSendNotice(true)
 	}
 	if !retry {
-		pending = PendingSend{Room: state.Profile.Room, EventID: msg.Event.ID, Sender: msg.Event.Sender, Timestamp: msg.Event.Timestamp, BodyHash: bodyHash, Media: media, KnownUnsent: true}
+		pending = PendingSend{Room: state.Profile.Room, EventID: msg.Event.ID, Sender: msg.Event.Sender, Timestamp: msg.Event.Timestamp, BodyHash: bodyHash, Media: media, KnownUnsent: true, ReplyTo: replyTo}
 	}
 	c.meta.Pending[requestID] = pending
 	err = c.login.Save(ctx)
@@ -1017,7 +1023,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	if err != nil {
 		return nil, errors.New("could not persist send intent; no message sent")
 	}
-	m, err := api.Send(ctx, state.Profile.Room, text, requestID, attachments)
+	m, err := api.Send(ctx, state.Profile.Room, text, requestID, attachments, replyTo)
 	if err != nil {
 		certain := false
 		var httpErr *chatgpt.HTTPError
@@ -1048,7 +1054,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 }
 
 func (c *Client) sendResponse(m chatgpt.Message, media bool, generation context.Context) *bridgev2.MatrixMessageResponse {
-	return &bridgev2.MatrixMessageResponse{DB: &database.Message{ID: networkid.MessageID(m.ID), SenderID: c.GetUserID(), Timestamp: m.Created, Metadata: &MessageMetadata{Revision: revision(m), OutgoingMedia: media}}, PostSave: func(ctx context.Context, _ *database.Message) {
+	return &bridgev2.MatrixMessageResponse{DB: &database.Message{ID: networkid.MessageID(m.ID), SenderID: c.GetUserID(), ThreadRoot: networkid.MessageID(m.ReplyRootMessageID), Timestamp: m.Created, Metadata: &MessageMetadata{Revision: revision(m), OutgoingMedia: media}}, PostSave: func(ctx context.Context, _ *database.Message) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		// The framework calls PostSave after this client's handler has returned.
@@ -1066,6 +1072,12 @@ func (c *Client) sendResponse(m chatgpt.Message, media bool, generation context.
 	}}
 }
 func (c *Client) findRequest(ctx context.Context, api *chatgpt.Client, state *RoomState, requestID string) (*chatgpt.Message, error) {
+	c.mu.RLock()
+	replyTo := c.meta.Pending[requestID].ReplyTo
+	c.mu.RUnlock()
+	if replyTo != "" {
+		return c.findReplyRequest(ctx, api, state, requestID, replyTo)
+	}
 	after := state.Baseline
 	seen := map[string]bool{}
 	for !seen[after] {

@@ -192,12 +192,27 @@ func (c *Client) syncReactions(ctx context.Context, state *RoomState, m chatgpt.
 	if len(parts) == 0 || m.Deleted != nil {
 		return nil
 	}
+	for _, sender := range []struct {
+		member string
+		event  bridgev2.EventSender
+	}{
+		{state.DotMember, bridgev2.EventSender{Sender: c.dotID(state)}},
+		{state.HumanMember, bridgev2.EventSender{Sender: c.GetUserID(), SenderLogin: c.login.ID, IsFromMe: true}},
+	} {
+		if err = c.syncReaction(ctx, state, m, parts, sender.member, sender.event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) syncReaction(ctx context.Context, state *RoomState, m chatgpt.Message, parts []*database.Message, member string, eventSender bridgev2.EventSender) error {
 	partID := textPartID(m, parts)
 	if attachments := mappedAttachments(m, parts); len(attachments) > 0 {
 		partID = attachments[0].PartID
 	}
-	emoji := m.Reactions[state.DotMember]
-	sender := c.dotID(state)
+	emoji := m.Reactions[member]
+	sender := eventSender.Sender
 	readSaved := func() ([]*database.Reaction, error) {
 		return c.connector.bridge.DB.Reaction.GetAllToMessageBySender(ctx, c.login.ID, networkid.MessageID(m.ID), sender)
 	}
@@ -224,9 +239,9 @@ func (c *Client) syncReactions(ctx context.Context, state *RoomState, m chatgpt.
 	}
 	user := &bridgev2.ReactionSyncUser{HasAllReactions: true}
 	if emoji != "" {
-		user.Reactions = []*bridgev2.BackfillReaction{{Sender: bridgev2.EventSender{Sender: sender}, Emoji: emoji, TargetPart: &partID}}
+		user.Reactions = []*bridgev2.BackfillReaction{{Sender: eventSender, Emoji: emoji, TargetPart: &partID}}
 	}
-	evt := &reactionSnapshot{ReactionSync: simplevent.ReactionSync{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventReactionSync, PortalKey: c.key(state), Sender: bridgev2.EventSender{Sender: sender}}, TargetMessage: networkid.MessageID(m.ID), Reactions: &bridgev2.ReactionSyncData{Users: map[networkid.UserID]*bridgev2.ReactionSyncUser{sender: user}}}, part: partID}
+	evt := &reactionSnapshot{ReactionSync: simplevent.ReactionSync{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventReactionSync, PortalKey: c.key(state), Sender: eventSender}, TargetMessage: networkid.MessageID(m.ID), Reactions: &bridgev2.ReactionSyncData{Users: map[networkid.UserID]*bridgev2.ReactionSyncUser{sender: user}}}, part: partID}
 	evt.MutateContextFunc = func(context.Context) context.Context { return ctx }
 	result := c.login.QueueRemoteEvent(evt)
 	if !result.Success || result.Ignored {

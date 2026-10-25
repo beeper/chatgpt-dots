@@ -11,16 +11,18 @@ protocol can interrupt the connection.
 ## Features
 
 - Text messages, including incoming Markdown formatting.
+- Quoted replies and native reply threads in both directions.
+- Emoji reactions in both directions, with one reaction per person per message.
 - Images, files and videos in both directions, with a bridge-local 20 MiB limit.
 - Task cards whose titles and status update in place.
 - Confirmation cards with explicit accept, decline and status commands.
-- Incoming Dot emoji reactions, typing indicators and read receipts.
+- Incoming typing indicators and read receipts.
 - Separate Dot and account avatars, account profile refresh and session renewal.
 - Recovery of messages received after linking, including across restarts.
 
 The bridge connects one existing primary Dot in a personal account. It does not
 import regular ChatGPT conversations or pre-link history. Groups, creating Dots,
-ordinary quoted replies, voice notes and sending reactions, typing or read receipts are
+voice notes and sending typing or read receipts are
 not supported. Some native message formats remain unsupported. See the
 [setup guide](docs/README.md) to run a standalone instance.
 
