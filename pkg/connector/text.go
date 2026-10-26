@@ -3,10 +3,15 @@ package connector
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"html"
+	"math"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
+	"github.com/rs/zerolog"
 	"github.com/yuin/goldmark"
 	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
 	"maunium.net/go/mautrix/event"
@@ -51,4 +56,42 @@ func applyCaption(content *event.MessageEventContent, text string) {
 	content.Format = caption.Format
 	content.FormattedBody = caption.FormattedBody
 	content.Mentions = caption.Mentions
+}
+
+const maxMatrixContentBytes = 40000
+
+const longTextCutOffNotice = "\n\n[Message cut off. View the full message in ChatGPT.]"
+
+func matrixContentSize(content *event.MessageEventContent) int {
+	raw, err := json.Marshal(content)
+	if err != nil {
+		return math.MaxInt
+	}
+	return len(raw)
+}
+
+func cutOffLongText(log zerolog.Logger, content *event.MessageEventContent, limit int) {
+	original := matrixContentSize(content)
+	if original <= limit {
+		return
+	}
+	content.Format, content.FormattedBody = "", ""
+	body := content.Body
+	if matrixContentSize(content) > limit {
+		fits := func(cut int) bool {
+			for cut > 0 && !utf8.RuneStart(body[cut]) {
+				cut--
+			}
+			content.Body = body[:cut] + longTextCutOffNotice
+			return matrixContentSize(content) <= limit
+		}
+		cut := sort.Search(len(body), func(cut int) bool { return !fits(cut + 1) })
+		fits(cut)
+	}
+	log.Info().
+		Int("original_bytes", original).
+		Int("body_bytes", len(body)).
+		Int("final_bytes", matrixContentSize(content)).
+		Bool("cut_off", content.Body != body).
+		Msg("Shortened long ChatGPT message to fit in a Matrix event")
 }
