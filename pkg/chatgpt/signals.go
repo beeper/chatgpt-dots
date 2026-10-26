@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sync/atomic"
@@ -62,7 +64,27 @@ type StreamDisconnectedError struct {
 
 func (StreamDisconnectedError) Error() string { return "ChatGPT messaging stream disconnected" }
 
-func rootErrorType(err error) string {
+func readErrorKind(err error) string {
+	var netErr net.Error
+	var opErr *net.OpError
+	switch {
+	case websocket.CloseStatus(err) != -1:
+		return "close_frame"
+	case errors.Is(err, io.EOF):
+		return "eof"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "unexpected_eof"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, net.ErrClosed):
+		return "closed"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "net_timeout"
+	case errors.As(err, &opErr):
+		return "net_" + opErr.Op
+	}
 	for inner := errors.Unwrap(err); inner != nil; inner = errors.Unwrap(err) {
 		err = inner
 	}
@@ -133,7 +155,7 @@ func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) e
 		_, data, err := conn.Read(readCtx)
 		cancel()
 		if err != nil {
-			return StreamDisconnectedError{CloseStatus: websocket.CloseStatus(err), PingFailed: pingFailed.Load(), Subscribed: subscribed, Connected: time.Since(connected), ReadError: rootErrorType(err)}
+			return StreamDisconnectedError{CloseStatus: websocket.CloseStatus(err), PingFailed: pingFailed.Load(), Subscribed: subscribed, Connected: time.Since(connected), ReadError: readErrorKind(err)}
 		}
 		var frames []struct {
 			ID      int             `json:"id"`
