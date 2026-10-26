@@ -110,7 +110,9 @@ func (c *Client) state(err error) bool {
 	c.connected.Store(false)
 	state := status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: stateSyncFailed, Info: map[string]any{"go_error": err.Error()}}
 	var httpErr *chatgpt.HTTPError
-	if errors.As(err, &httpErr) {
+	if errors.Is(err, errDotUnavailable) {
+		state = badCredentialsState(stateDotUnavailable, err)
+	} else if errors.As(err, &httpErr) {
 		c.login.Log.Warn().Err(err).
 			Int("status", httpErr.Status).
 			Str("path", httpErr.Path).
@@ -217,7 +219,10 @@ func (c *Client) run(ctx context.Context) {
 			if avatars {
 				nextAvatarRefresh = time.Now().Add(avatarRefreshInterval)
 			}
-			if profileErr := c.verify(ctx, api, avatars); profileErr != nil {
+			if profileErr := c.verify(ctx, api, avatars); errors.Is(profileErr, errDotUnavailable) {
+				c.state(profileErr)
+				return
+			} else if profileErr != nil {
 				c.login.Log.Warn().Err(profileErr).Msg("Could not refresh ChatGPT profiles")
 			}
 			nextProfileRefresh = time.Now().Add(time.Minute)
@@ -274,7 +279,7 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) 
 	for _, state := range c.meta.Rooms {
 		r, err := api.Verify(ctx, state.Profile)
 		if err != nil {
-			return err
+			return c.checkDotReplaced(ctx, api, state, err)
 		}
 		current, err := roomState(api, state.Profile, r)
 		if err != nil {
@@ -328,6 +333,25 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) 
 		}
 	}
 	return nil
+}
+func (c *Client) checkDotReplaced(ctx context.Context, api *chatgpt.Client, state *RoomState, err error) error {
+	var httpErr *chatgpt.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusNotFound {
+		return err
+	}
+	profiles, discoverErr := api.Discover(ctx)
+	var primaryErr *chatgpt.HTTPError
+	missing := errors.Is(discoverErr, chatgpt.ErrNoPrimaryDot) || errors.As(discoverErr, &primaryErr) && primaryErr.PrimaryUnavailable
+	replaced := discoverErr == nil && (profiles[0].ID != state.Profile.ID || profiles[0].Room != state.Profile.Room)
+	c.login.Log.Warn().
+		Bool("primary_dot_missing", missing).
+		Bool("primary_dot_replaced", replaced).
+		Bool("primary_dot_unknown", discoverErr != nil && !missing).
+		Msg("The linked Dot room returned HTTP 404")
+	if missing || replaced {
+		return fmt.Errorf("%w: %w", errDotUnavailable, err)
+	}
+	return err
 }
 func (c *Client) refreshSelfAvatar(ctx context.Context, api *chatgpt.Client, state *RoomState) {
 	data, err := api.SelfAvatar(ctx, state.Profile)

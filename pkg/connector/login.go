@@ -225,6 +225,19 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 		meta.ConfirmationsSynced = existing.ConfirmationsSynced
 		meta.ConfirmationVersion = existing.ConfirmationVersion
 	}
+	if len(meta.Rooms) == 1 && meta.Rooms[profiles[0].Room] == nil {
+		for room, state := range meta.Rooms {
+			var httpErr *chatgpt.HTTPError
+			if _, err := api.Verify(ctx, state.Profile); errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound {
+				delete(meta.Rooms, room)
+				for id, pending := range meta.Pending {
+					if pending.Room == room {
+						delete(meta.Pending, id)
+					}
+				}
+			}
+		}
+	}
 	if len(meta.Rooms) > 1 || (len(meta.Rooms) == 1 && meta.Rooms[profiles[0].Room] == nil) {
 		return nil, bridgev2.RespError(mautrix.MBadState.WithMessage("This ChatGPT account's primary Dot is different from the one already connected. Log out of the existing ChatGPT connection to link the new Dot.").WithStatus(http.StatusBadRequest))
 	}
