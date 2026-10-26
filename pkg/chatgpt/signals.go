@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -51,7 +54,44 @@ func (c *Client) RoomSignals(ctx context.Context, p Profile) (*Room, error) {
 	return &room, nil
 }
 
-func keepAlive(ctx context.Context, conn *websocket.Conn) {
+type StreamDisconnectedError struct {
+	CloseStatus websocket.StatusCode
+	PingFailed  bool
+	Subscribed  bool
+	Connected   time.Duration
+	ReadError   string
+}
+
+func (StreamDisconnectedError) Error() string { return "ChatGPT messaging stream disconnected" }
+
+func readErrorKind(err error) string {
+	var netErr net.Error
+	var opErr *net.OpError
+	switch {
+	case websocket.CloseStatus(err) != -1:
+		return "close_frame"
+	case errors.Is(err, io.EOF):
+		return "eof"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "unexpected_eof"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, net.ErrClosed):
+		return "closed"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "net_timeout"
+	case errors.As(err, &opErr):
+		return "net_" + opErr.Op
+	}
+	for inner := errors.Unwrap(err); inner != nil; inner = errors.Unwrap(err) {
+		err = inner
+	}
+	return fmt.Sprintf("%T", err)
+}
+
+func keepAlive(ctx context.Context, conn *websocket.Conn, failed *atomic.Bool) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -64,6 +104,7 @@ func keepAlive(ctx context.Context, conn *websocket.Conn) {
 		err := conn.Ping(pingCtx)
 		cancel()
 		if err != nil {
+			failed.Store(true)
 			conn.CloseNow()
 			return
 		}
@@ -92,9 +133,11 @@ func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) e
 	}
 	defer conn.CloseNow()
 	conn.SetReadLimit(4 << 20)
+	connected := time.Now()
+	var pingFailed atomic.Bool
 	pingCtx, stopPing := context.WithCancel(ctx)
 	defer stopPing()
-	go keepAlive(pingCtx, conn)
+	go keepAlive(pingCtx, conn, &pingFailed)
 	commands := `[{"id":1,"command":{"type":"connect","presence":{"type":"presence","state":"background"}}},{"id":2,"command":{"type":"subscribe","topic_id":"calpico-chatgpt-messaging"}}]`
 	writeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	err = conn.Write(writeCtx, websocket.MessageText, []byte(commands))
@@ -112,7 +155,7 @@ func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) e
 		_, data, err := conn.Read(readCtx)
 		cancel()
 		if err != nil {
-			return errors.New("ChatGPT messaging stream disconnected")
+			return StreamDisconnectedError{CloseStatus: websocket.CloseStatus(err), PingFailed: pingFailed.Load(), Subscribed: subscribed, Connected: time.Since(connected), ReadError: readErrorKind(err)}
 		}
 		var frames []struct {
 			ID      int             `json:"id"`
