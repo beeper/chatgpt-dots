@@ -101,7 +101,16 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 		if ctx.Err() != nil {
 			return
 		}
-		c.login.Log.Warn().Err(err).Msg("ChatGPT live signals disconnected; message and receipt polling remains active")
+		evt := c.login.Log.Warn().Err(err)
+		var disconnected chatgpt.StreamDisconnectedError
+		if errors.As(err, &disconnected) {
+			evt = evt.Int("close_status", int(disconnected.CloseStatus)).
+				Bool("ping_failed", disconnected.PingFailed).
+				Bool("subscribed", disconnected.Subscribed).
+				Dur("connected_for", disconnected.Connected).
+				Str("read_error", disconnected.ReadError)
+		}
+		evt.Msg("ChatGPT live signals disconnected; message and receipt polling remains active")
 		if time.Since(started) >= time.Minute {
 			delay = time.Second
 		}
