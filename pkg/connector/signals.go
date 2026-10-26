@@ -79,13 +79,11 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 				} else {
 					delete(active, signal.Payload.Room)
 				}
-				return c.sendTyping(ctx, state, timeout)
+				c.sendTyping(ctx, state, timeout)
 			case "calpico-message-add":
 				if signal.Payload.Message.Member == state.DotMember {
 					delete(active, signal.Payload.Room)
-					if err := c.sendTyping(ctx, state, 0); err != nil {
-						return err
-					}
+					c.sendTyping(ctx, state, 0)
 				}
 				c.requestSync(false)
 			case "calpico-message-update", "calpico-room-read-receipt", "calpico-room-metadata-update":
@@ -112,16 +110,12 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 	}
 }
 
-func (c *Client) sendTyping(ctx context.Context, state *RoomState, timeout time.Duration) error {
+func (c *Client) sendTyping(ctx context.Context, state *RoomState, timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	evt := &nativeTyping{Typing: simplevent.Typing{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventTyping, PortalKey: c.key(state), Sender: bridgev2.EventSender{Sender: c.dotID(state)}}, Type: bridgev2.TypingTypeText}, expires: time.Now().Add(timeout)}
 	evt.MutateContextFunc = func(context.Context) context.Context { return ctx }
-	result := c.login.QueueRemoteEvent(evt)
-	if !result.Success || result.Ignored {
-		return errors.New("could not bridge Dot typing signal")
-	}
-	return nil
+	c.login.QueueRemoteEvent(evt)
 }
 
 func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *RoomState) (*receiptState, error) {
