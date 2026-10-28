@@ -120,32 +120,49 @@ var (
 type HTTPError struct {
 	Status             int
 	Path               string
+	Detail             string
 	Challenge          bool
 	PrimaryUnavailable bool
 }
 
 func newHTTPError(resp *http.Response) *HTTPError {
-	return &HTTPError{
+	failure := &HTTPError{
 		Status:    resp.StatusCode,
 		Path:      resp.Request.URL.Path,
 		Challenge: resp.StatusCode == http.StatusForbidden && resp.Header.Get("cf-mitigated") == "challenge",
 	}
+	var body struct {
+		Detail any `json:"detail"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body) == nil {
+		switch detail := body.Detail.(type) {
+		case string:
+			failure.Detail = strings.TrimSpace(detail)
+		case map[string]any:
+			message, _ := detail["message"].(string)
+			failure.Detail = strings.TrimSpace(message)
+		}
+	}
+	return failure
 }
 
 func (e *HTTPError) Error() string {
 	if e.Challenge {
 		return "ChatGPT's Cloudflare check blocked the bridge; retrying"
 	}
+	var message string
 	switch e.Status {
 	case 401:
-		return "ChatGPT authentication expired; reconnect in Beeper"
-	case 404:
-		return "ChatGPT returned HTTP 404"
+		message = "ChatGPT authentication expired; reconnect in Beeper"
 	case 429:
-		return "ChatGPT rate limit; delivery will retry after backoff"
+		message = "ChatGPT rate limit; delivery will retry after backoff"
 	default:
-		return fmt.Sprintf("ChatGPT returned HTTP %d", e.Status)
+		message = fmt.Sprintf("ChatGPT returned HTTP %d", e.Status)
 	}
+	if e.Detail != "" {
+		message += ": " + e.Detail
+	}
+	return message
 }
 
 type Client struct {
@@ -221,12 +238,7 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		failure := newHTTPError(resp)
-		if resp.StatusCode == http.StatusNotFound && req.URL.Path == "/backend-api/tbo/primary" {
-			var body struct {
-				Detail string `json:"detail"`
-			}
-			failure.PrimaryUnavailable = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body) == nil && body.Detail == "Not Found"
-		}
+		failure.PrimaryUnavailable = resp.StatusCode == http.StatusNotFound && req.URL.Path == "/backend-api/tbo/primary" && failure.Detail == "Not Found"
 		return failure
 	}
 	if out == nil {

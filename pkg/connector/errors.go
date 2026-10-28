@@ -62,6 +62,18 @@ func isTransportError(err error) bool {
 	return errors.Is(err, chatgpt.ErrTransport) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
+func isRejection(err error) bool {
+	var httpErr *chatgpt.HTTPError
+	return errors.As(err, &httpErr) && httpErr.Status >= 400 && httpErr.Status < 500 && httpErr.Status != http.StatusRequestTimeout
+}
+
+func withDetail(message string, httpErr *chatgpt.HTTPError) string {
+	if httpErr.Detail == "" {
+		return message
+	}
+	return message + ": " + httpErr.Detail
+}
+
 func wrapSendError(err error, certain bool) error {
 	if err == nil || errors.As(err, &bridgev2.MessageStatus{}) {
 		return err
@@ -72,15 +84,20 @@ func wrapSendError(err error, certain bool) error {
 	case errors.As(err, &httpErr):
 		switch {
 		case httpErr.Status == http.StatusUnauthorized:
-			ms = ms.WithErrorReason(event.MessageStatusNoPermission).WithMessage("your ChatGPT session expired, reconnect ChatGPT")
+			ms = ms.WithErrorReason(event.MessageStatusBridgeUnavailable).WithMessage("your ChatGPT session expired, reconnect ChatGPT")
 		case httpErr.Challenge:
 			ms = ms.WithErrorReason(event.MessageStatusNetworkError).WithMessage("ChatGPT's Cloudflare check blocked the request, try again later")
 		case httpErr.Status == http.StatusTooManyRequests:
 			ms = ms.WithErrorReason(event.MessageStatusNetworkError).WithMessage("ChatGPT is rate limiting requests, try again in a moment")
 		case httpErr.Status >= 500:
 			ms = ms.WithErrorReason(event.MessageStatusNetworkError).WithMessage("ChatGPT had a server error, try again later")
+		case httpErr.Status == http.StatusForbidden:
+			ms = ms.WithErrorReason(event.MessageStatusNoPermission).WithMessage(withDetail("ChatGPT denied the request", httpErr))
 		default:
-			ms = ms.WithErrorReason(event.MessageStatusNetworkError).WithMessage("ChatGPT rejected the request")
+			ms = ms.WithErrorReason(event.MessageStatusNetworkError).WithMessage(withDetail("ChatGPT rejected the request", httpErr))
+		}
+		if certain && isRejection(httpErr) && !httpErr.Challenge && httpErr.Status != http.StatusTooManyRequests {
+			ms = ms.WithStatus(event.MessageStatusFail)
 		}
 	case isTransportError(err):
 		ms = ms.WithMessage("couldn't reach ChatGPT, try again")

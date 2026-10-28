@@ -1056,13 +1056,10 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	}
 	m, err := api.Send(ctx, state.Profile.Room, text, requestID, attachments, replyTo)
 	if err != nil {
-		certain := false
+		certain := !wasUncertain && isRejection(err)
 		var httpErr *chatgpt.HTTPError
-		if errors.As(err, &httpErr) {
-			certain = !wasUncertain && httpErr.Status >= 400 && httpErr.Status < 500 && httpErr.Status != 408
-			if httpErr.Status == 401 || httpErr.Status == 403 {
-				c.state(err)
-			}
+		if errors.As(err, &httpErr) && (httpErr.Status == 401 || httpErr.Status == 403) {
+			c.state(err)
 		}
 		if certain {
 			c.mu.Lock()
