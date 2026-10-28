@@ -67,6 +67,14 @@ func isRejection(err error) bool {
 	return errors.As(err, &httpErr) && httpErr.Status >= 400 && httpErr.Status < 500 && httpErr.Status != http.StatusRequestTimeout
 }
 
+func isMessageRejection(httpErr *chatgpt.HTTPError) bool {
+	switch httpErr.Status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return false
+	}
+	return isRejection(httpErr) && !httpErr.Challenge
+}
+
 func withDetail(message string, httpErr *chatgpt.HTTPError) string {
 	if httpErr.Detail == "" {
 		return message
@@ -96,7 +104,7 @@ func wrapSendError(err error, certain bool) error {
 		default:
 			ms = ms.WithErrorReason(event.MessageStatusNetworkError).WithMessage(withDetail("ChatGPT rejected the request", httpErr))
 		}
-		if certain && isRejection(httpErr) && !httpErr.Challenge && httpErr.Status != http.StatusTooManyRequests {
+		if certain && isMessageRejection(httpErr) {
 			ms = ms.WithStatus(event.MessageStatusFail)
 		}
 	case isTransportError(err):

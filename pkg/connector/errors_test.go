@@ -20,8 +20,8 @@ func TestWrapSendErrorPermanence(t *testing.T) {
 	}{
 		{"rejected with detail", &chatgpt.HTTPError{Status: 400, Detail: "Message is too long"}, true, event.MessageStatusFail, event.MessageStatusNetworkError, "ChatGPT rejected the request: Message is too long"},
 		{"rejected without detail", &chatgpt.HTTPError{Status: 404}, true, event.MessageStatusFail, event.MessageStatusNetworkError, "ChatGPT rejected the request"},
-		{"forbidden", &chatgpt.HTTPError{Status: 403, Detail: "Not allowed"}, true, event.MessageStatusFail, event.MessageStatusNoPermission, "ChatGPT denied the request: Not allowed"},
-		{"auth expired", &chatgpt.HTTPError{Status: 401}, true, event.MessageStatusFail, event.MessageStatusBridgeUnavailable, "your ChatGPT session expired, reconnect ChatGPT"},
+		{"forbidden", &chatgpt.HTTPError{Status: 403, Detail: "Not allowed"}, true, event.MessageStatusRetriable, event.MessageStatusNoPermission, "ChatGPT denied the request: Not allowed"},
+		{"auth expired", &chatgpt.HTTPError{Status: 401}, true, event.MessageStatusRetriable, event.MessageStatusBridgeUnavailable, "your ChatGPT session expired, reconnect ChatGPT"},
 		{"cloudflare challenge", &chatgpt.HTTPError{Status: 403, Challenge: true}, true, event.MessageStatusRetriable, event.MessageStatusNetworkError, "ChatGPT's Cloudflare check blocked the request, try again later"},
 		{"rate limited", &chatgpt.HTTPError{Status: 429}, true, event.MessageStatusRetriable, event.MessageStatusNetworkError, "ChatGPT is rate limiting requests, try again in a moment"},
 		{"request timeout", &chatgpt.HTTPError{Status: 408}, true, event.MessageStatusRetriable, event.MessageStatusNetworkError, "ChatGPT rejected the request"},
