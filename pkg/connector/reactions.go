@@ -3,9 +3,12 @@ package connector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -58,12 +61,15 @@ func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixR
 	if err != nil {
 		return nil, err
 	}
+	logCtx := ctx
 	ctx, api, state, finish, err := c.reactionClient(ctx, msg.Portal, msg.TargetMessage.Room)
 	if err != nil {
+		c.logReactionFailure(logCtx, err, "verify_room", pre.Emoji, msg.TargetMessage)
 		return nil, err
 	}
 	defer finish()
 	if err = api.SetReaction(ctx, state.Profile.Room, string(msg.TargetMessage.ID), &pre.Emoji); err != nil {
+		c.logReactionFailure(ctx, err, "add_reaction", pre.Emoji, msg.TargetMessage)
 		return nil, wrapSendError(err, false)
 	}
 	c.requestSync(true)
@@ -77,13 +83,16 @@ func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.M
 	if target == nil || target.MessageID == "" || target.SenderID != c.GetUserID() {
 		return errors.New("refusing to remove another Dot member's reaction")
 	}
+	logCtx := ctx
 	ctx, api, state, finish, err := c.reactionClient(ctx, msg.Portal, target.Room)
 	if err != nil {
+		c.logReactionFailure(logCtx, err, "verify_room", target.Emoji, nil)
 		return err
 	}
 	defer finish()
 	current, err := api.Message(ctx, state.Profile.Room, string(target.MessageID))
 	if err != nil {
+		c.logReactionFailure(ctx, err, "read_target", target.Emoji, nil)
 		return wrapSendError(err, true)
 	}
 	if current.Reactions[state.HumanMember] != target.Emoji {
@@ -91,10 +100,37 @@ func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.M
 		return nil
 	}
 	if err = api.SetReaction(ctx, state.Profile.Room, string(target.MessageID), nil); err != nil {
+		c.logReactionFailure(ctx, err, "remove_reaction", target.Emoji, nil)
 		return wrapSendError(err, false)
 	}
 	c.requestSync(true)
 	return nil
+}
+
+func (c *Client) logReactionFailure(ctx context.Context, err error, stage, emoji string, target *database.Message) {
+	codepoints := make([]string, 0, len(emoji))
+	for _, r := range emoji {
+		codepoints = append(codepoints, fmt.Sprintf("U+%04X", r))
+	}
+	evt := zerolog.Ctx(ctx).Warn().Err(err).
+		Str("stage", stage).
+		Str("emoji_codepoints", strings.Join(codepoints, " "))
+	var httpErr *chatgpt.HTTPError
+	if errors.As(err, &httpErr) {
+		evt = evt.Int("status", httpErr.Status).Str("path", httpErr.Path)
+	}
+	if target != nil {
+		sender := "dot"
+		if target.SenderID == c.GetUserID() {
+			sender = "self"
+		}
+		evt = evt.Str("target_sender", sender).
+			Bool("target_has_part_id", target.PartID != "").
+			Bool("target_in_thread", target.ThreadRoot != "").
+			Int("target_edit_count", target.EditCount).
+			Dur("target_age", time.Since(target.Timestamp))
+	}
+	evt.Msg("ChatGPT Dot reaction failed")
 }
 
 var _ bridgev2.ReactionHandlingNetworkAPI = (*Client)(nil)
