@@ -33,7 +33,7 @@ func (c *Client) reactionClient(ctx context.Context, portal *bridgev2.Portal, ro
 	if portal == nil || room != portal.PortalKey || room.Receiver != c.login.ID || state == nil {
 		return nil, nil, nil, nil, relinkStatus(errors.New("refusing reaction in an unverified Dot room"), true)
 	}
-	if api == nil || generation == nil || generation.Err() != nil || !c.connected.Load() {
+	if api == nil || generation == nil || generation.Err() != nil || !c.IsLoggedIn() {
 		return nil, nil, nil, nil, wrapSendError(errors.New("not connected to ChatGPT"), true)
 	}
 	ctx, cancel := context.WithCancel(ctx)

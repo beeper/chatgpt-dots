@@ -38,12 +38,13 @@ type Client struct {
 	meta           *LoginMetadata
 	lifecycle      sync.Mutex
 	sendMu         sync.Mutex
+	stateMu        sync.Mutex
 	mu             sync.RWMutex
 	api            *chatgpt.Client
 	runContext     context.Context
 	cancel         context.CancelFunc
 	done           chan struct{}
-	connected      atomic.Bool
+	loggedOut      atomic.Bool
 	threadMessages map[string]*threadMessage
 	signalWake     chan struct{}
 	signalsLive    atomic.Bool
@@ -70,7 +71,6 @@ func (c *Client) Disconnect() {
 	c.lifecycle.Lock()
 	defer c.lifecycle.Unlock()
 	c.mu.Lock()
-	c.connected.Store(false)
 	c.api = nil
 	if c.cancel != nil {
 		c.cancel()
@@ -83,11 +83,10 @@ func (c *Client) Disconnect() {
 	c.sendMu.Lock()
 	c.sendMu.Unlock()
 	c.mu.Lock()
-	c.connected.Store(false)
 	c.api = nil
 	c.mu.Unlock()
 }
-func (c *Client) IsLoggedIn() bool { return c.connected.Load() }
+func (c *Client) IsLoggedIn() bool { return !c.loggedOut.Load() }
 func (c *Client) LogoutRemote(context.Context) {
 	c.connector.loginMu.Lock()
 	defer c.connector.loginMu.Unlock()
@@ -106,8 +105,18 @@ func (c *Client) LogoutRemote(context.Context) {
 	}
 }
 
+func (c *Client) sendState(state status.BridgeState) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	switch state.StateEvent {
+	case status.StateBadCredentials:
+		c.loggedOut.Store(true)
+	case status.StateConnected:
+		c.loggedOut.Store(false)
+	}
+	c.login.BridgeState.Send(state)
+}
 func (c *Client) state(err error) bool {
-	c.connected.Store(false)
 	state := status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: stateSyncFailed, Info: map[string]any{"go_error": err.Error()}}
 	var httpErr *chatgpt.HTTPError
 	if errors.Is(err, errDotUnavailable) {
@@ -135,7 +144,7 @@ func (c *Client) state(err error) bool {
 	} else if isTransportError(err) {
 		state.Error = stateNetworkError
 	}
-	c.login.BridgeState.Send(state)
+	c.sendState(state)
 	return state.StateEvent == status.StateBadCredentials
 }
 func (c *Client) run(ctx context.Context) {
@@ -150,20 +159,20 @@ func (c *Client) run(ctx context.Context) {
 	c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnecting})
 	creds, err := c.connector.readCredentials(ctx, c.login)
 	if errors.Is(err, errNoCredentials) {
-		c.login.BridgeState.Send(badCredentialsState(stateNoCredentials, err))
+		c.sendState(badCredentialsState(stateNoCredentials, err))
 		return
 	} else if err != nil {
-		c.login.BridgeState.Send(badCredentialsState(stateBadCredentials, err))
+		c.sendState(badCredentialsState(stateBadCredentials, err))
 		return
 	}
 	proxy := &proxyTransport{connector: c.connector, log: c.login.Log}
 	api, err := chatgpt.New(creds, proxy)
 	if err != nil {
-		c.login.BridgeState.Send(badCredentialsState(stateBadCredentials, err))
+		c.sendState(badCredentialsState(stateBadCredentials, err))
 		return
 	}
 	if api.Identity.Account != c.meta.Account || api.Identity.User != c.meta.User {
-		c.login.BridgeState.Send(badCredentialsState(stateIdentityChanged, errors.New("credential identity changed")))
+		c.sendState(badCredentialsState(stateIdentityChanged, errors.New("credential identity changed")))
 		return
 	}
 	api.PersistCredentials = func(updated chatgpt.Credentials) error {
@@ -249,8 +258,7 @@ func (c *Client) run(ctx context.Context) {
 			if err != nil {
 				c.login.Log.Debug().Err(err).Msg("Waiting to retry a ChatGPT attachment download")
 			}
-			c.connected.Store(true)
-			c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+			c.sendState(status.BridgeState{StateEvent: status.StateConnected})
 			delay = pollInterval
 		}
 		timer := time.NewTimer(delay)
@@ -943,7 +951,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	prior, hadPrior := c.meta.Pending[requestID]
 	c.mu.RUnlock()
 	certain := !hadPrior || prior.KnownUnsent
-	if api == nil || runContext == nil || runContext.Err() != nil || !c.connected.Load() {
+	if api == nil || runContext == nil || runContext.Err() != nil || !c.IsLoggedIn() {
 		return nil, bridgev2.WrapErrorInStatus(errors.New("not connected to ChatGPT")).
 			WithMessage("not connected to ChatGPT, try again in a moment").
 			WithIsCertain(certain).

@@ -66,7 +66,6 @@ func interactionClient(t *testing.T, transport http.RoundTripper) (*Client, *bri
 		t.Fatal(err)
 	}
 	client.runContext = ctx
-	client.connected.Store(true)
 	return client, portal, target
 }
 
