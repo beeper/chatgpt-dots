@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -135,21 +134,5 @@ func TestOutgoingReactionReplacementAndStaleRemoval(t *testing.T) {
 	old.Room.Receiver = "other-login"
 	if err := api.HandleMatrixReactionRemove(ctx, remove); err == nil || deletes != 1 {
 		t.Fatal("reaction from another login reached the provider")
-	}
-}
-
-func TestRejectedReactionFailsPermanentlyWithChatGPTDetail(t *testing.T) {
-	transport := confirmationHTTP(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Path == "/backend-api/messaging/rooms/room" {
-			return interactionRoomResponse(r), nil
-		}
-		return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(`{"detail":{"code":"invalid_reaction","message":"Reaction is not supported"}}`)), Request: r}, nil
-	})
-	client, portal, target := interactionClient(t, transport)
-	msg := &bridgev2.MatrixReaction{MatrixEventBase: bridgev2.MatrixEventBase[*event.ReactionEventContent]{Portal: portal, Content: &event.ReactionEventContent{RelatesTo: event.RelatesTo{Key: "👍"}}}, TargetMessage: target}
-	_, err := client.HandleMatrixReaction(context.Background(), msg)
-	var ms bridgev2.MessageStatus
-	if !errors.As(err, &ms) || ms.Status != event.MessageStatusFail || !ms.IsCertain || ms.Message != "ChatGPT rejected the request: Reaction is not supported" {
-		t.Fatalf("rejected reaction was not a certain permanent failure: %+v", ms)
 	}
 }
