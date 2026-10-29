@@ -22,15 +22,19 @@ import (
 const taskWatchExpiry = time.Hour
 
 type threadMessage struct {
-	Room        *RoomState
-	Message     chatgpt.Message
-	NextRefresh time.Time
-	Backoff     time.Duration
-	TaskSynced  map[string]string
-	TaskBridged map[networkid.MessageID]bool
+	Room         *RoomState
+	Message      chatgpt.Message
+	NextRefresh  time.Time
+	Backoff      time.Duration
+	TaskSynced   map[string]string
+	TaskBridged  map[networkid.MessageID]bool
+	TaskFailures map[string]int
 }
 
-const taskItemPrefix = "task:"
+const (
+	taskItemPrefix   = "task:"
+	taskItemAttempts = 5
+)
 
 func taskItemID(threadID, itemID string) networkid.MessageID {
 	return networkid.MessageID(taskItemPrefix + threadID + ":" + itemID)
@@ -246,15 +250,25 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 			changed = changed || previous == nil || *next != *previous
 			message.Threads[threadID] = next
 			if key := taskSyncKey(next); watch.TaskSynced[threadID] != key {
-				if err = c.bridgeTaskItems(ctx, api, watch, request, threadID); ctx.Err() != nil {
+				err = c.bridgeTaskItems(ctx, api, watch, request, threadID)
+				if ctx.Err() != nil {
 					return ctx.Err()
-				} else if err != nil {
-					c.login.Log.Warn().Err(err).Str("task_id", threadID).Msg("Could not bridge ChatGPT task replies")
-				} else {
+				}
+				if err != nil {
+					if watch.TaskFailures == nil {
+						watch.TaskFailures = make(map[string]int)
+					}
+					watch.TaskFailures[threadID]++
+					c.login.Log.Warn().Err(err).Str("task_id", threadID).Int("attempt", watch.TaskFailures[threadID]).Msg("Could not bridge ChatGPT task replies")
+				}
+				if err == nil || watch.TaskFailures[threadID] >= taskItemAttempts {
 					if watch.TaskSynced == nil {
 						watch.TaskSynced = make(map[string]string)
 					}
 					watch.TaskSynced[threadID] = key
+					delete(watch.TaskFailures, threadID)
+				} else {
+					failed = true
 				}
 			}
 			allTerminal = allTerminal && next.Terminal()
