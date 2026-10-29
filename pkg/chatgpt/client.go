@@ -121,6 +121,7 @@ type HTTPError struct {
 	Status             int
 	Path               string
 	Detail             string
+	Body               string
 	Challenge          bool
 	PrimaryUnavailable bool
 }
@@ -131,22 +132,31 @@ func newHTTPError(resp *http.Response) *HTTPError {
 		Path:      resp.Request.URL.Path,
 		Challenge: resp.StatusCode == http.StatusForbidden && resp.Header.Get("cf-mitigated") == "challenge",
 	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	var body struct {
-		Detail any `json:"detail"`
+		Detail json.RawMessage `json:"detail"`
 		Error  struct {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body) == nil {
-		switch detail := body.Detail.(type) {
-		case string:
-			failure.Detail = strings.TrimSpace(detail)
-		case map[string]any:
-			message, _ := detail["message"].(string)
-			failure.Detail = strings.TrimSpace(message)
-		case nil:
-			failure.Detail = strings.TrimSpace(body.Error.Message)
-		}
+	if json.Unmarshal(raw, &body) == nil && len(body.Detail) > 0 {
+		failure.Body = strings.TrimSpace(string(body.Detail))
+	} else {
+		failure.Body = strings.TrimSpace(string(raw))
+	}
+	if len(failure.Body) > 500 {
+		failure.Body = failure.Body[:500]
+	}
+	var detail any
+	_ = json.Unmarshal(body.Detail, &detail)
+	switch detail := detail.(type) {
+	case string:
+		failure.Detail = strings.TrimSpace(detail)
+	case map[string]any:
+		message, _ := detail["message"].(string)
+		failure.Detail = strings.TrimSpace(message)
+	case nil:
+		failure.Detail = strings.TrimSpace(body.Error.Message)
 	}
 	return failure
 }
