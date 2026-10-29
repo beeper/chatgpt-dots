@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -105,10 +108,36 @@ type TaskItem struct {
 	Timestamp time.Time
 }
 
+const maxTaskTurns = 20
+
+var taskItemViews = []string{"summary", "full"}
+
 func (c *Client) TaskItems(ctx context.Context, room string, message Message, threadID string) ([]TaskItem, error) {
 	if err := c.checkTaskRef(room, message, threadID); err != nil {
 		return nil, err
 	}
+	c.mu.RLock()
+	first := c.taskItemsView
+	c.mu.RUnlock()
+	var err error
+	for _, view := range taskItemViews[first:] {
+		var items []TaskItem
+		if items, err = c.taskItems(ctx, threadID, view); err == nil {
+			return items, nil
+		}
+		err = fmt.Errorf("itemsView=%s: %w", view, err)
+		var httpErr *HTTPError
+		if !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadRequest && httpErr.Status != http.StatusUnprocessableEntity {
+			return nil, err
+		}
+		c.mu.Lock()
+		c.taskItemsView = min(c.taskItemsView+1, len(taskItemViews)-1)
+		c.mu.Unlock()
+	}
+	return nil, err
+}
+
+func (c *Client) taskItems(ctx context.Context, threadID, view string) ([]TaskItem, error) {
 	type turn struct {
 		ID          string            `json:"id"`
 		Status      string            `json:"status"`
@@ -116,12 +145,11 @@ func (c *Client) TaskItems(ctx context.Context, room string, message Message, th
 		StartedAt   int64             `json:"startedAt"`
 		CompletedAt int64             `json:"completedAt"`
 	}
-	var result []TaskItem
+	var turns []turn
 	cursor := ""
 	seen := make(map[string]bool)
-	for !seen[cursor] {
-		seen[cursor] = true
-		query := url.Values{"limit": {"50"}, "sortDirection": {"asc"}, "itemsView": {"summary"}}
+	for len(turns) < maxTaskTurns {
+		query := url.Values{"limit": {"1"}, "sortDirection": {"desc"}, "itemsView": {view}}
 		if cursor != "" {
 			query.Set("cursor", cursor)
 		}
@@ -132,61 +160,75 @@ func (c *Client) TaskItems(ctx context.Context, room string, message Message, th
 		if err := c.doAt(ctx, taskOrigin, "GET", "/v2/threads/"+url.PathEscape(threadID)+"/turns?"+query.Encode(), nil, &page); err != nil {
 			return nil, err
 		}
-		for _, t := range page.Data {
-			finished := t.Status == "completed" || t.Status == "failed" || t.Status == "interrupted"
-			for _, raw := range t.Items {
-				var item struct {
-					Type    string `json:"type"`
-					ID      string `json:"id"`
-					Text    string `json:"text"`
-					Content []struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					} `json:"content"`
-					StartedAtMs   int64 `json:"startedAtMs"`
-					CompletedAtMs int64 `json:"completedAtMs"`
-				}
-				if json.Unmarshal(raw, &item) != nil || item.ID == "" {
-					continue
-				}
-				out := TaskItem{ID: item.ID}
-				switch item.Type {
-				case "userMessage":
-					var parts []string
-					for _, part := range item.Content {
-						if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
-							parts = append(parts, part.Text)
-						}
-					}
-					out.FromUser, out.Text = true, strings.Join(parts, "\n")
-				case "agentMessage":
-					if !finished {
-						continue
-					}
-					out.Text = item.Text
-				default:
-					continue
-				}
-				if strings.TrimSpace(out.Text) == "" {
-					continue
-				}
-				switch {
-				case item.CompletedAtMs > 0:
-					out.Timestamp = time.UnixMilli(item.CompletedAtMs)
-				case item.StartedAtMs > 0:
-					out.Timestamp = time.UnixMilli(item.StartedAtMs)
-				case !out.FromUser && t.CompletedAt > 0:
-					out.Timestamp = time.Unix(t.CompletedAt, 0)
-				case t.StartedAt > 0:
-					out.Timestamp = time.Unix(t.StartedAt, 0)
-				}
-				result = append(result, out)
-			}
+		turns = append(turns, page.Data...)
+		if page.NextCursor == "" || seen[page.NextCursor] {
+			break
 		}
-		if page.NextCursor == "" {
-			return result, nil
-		}
+		seen[page.NextCursor] = true
 		cursor = page.NextCursor
 	}
-	return nil, errors.New("ChatGPT task turn pagination repeated")
+	slices.Reverse(turns)
+	var result []TaskItem
+	for _, t := range turns {
+		finished := t.Status == "completed" || t.Status == "failed" || t.Status == "interrupted"
+		var prompt, answer *TaskItem
+		answerFinal := false
+		for _, raw := range t.Items {
+			var item struct {
+				Type    string `json:"type"`
+				ID      string `json:"id"`
+				Text    string `json:"text"`
+				Phase   string `json:"phase"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+				StartedAtMs   int64 `json:"startedAtMs"`
+				CompletedAtMs int64 `json:"completedAtMs"`
+			}
+			if json.Unmarshal(raw, &item) != nil || item.ID == "" {
+				continue
+			}
+			out := TaskItem{ID: item.ID}
+			switch {
+			case item.Type == "userMessage" && prompt == nil:
+				var parts []string
+				for _, part := range item.Content {
+					if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+						parts = append(parts, part.Text)
+					}
+				}
+				out.FromUser, out.Text = true, strings.Join(parts, "\n")
+			case item.Type == "agentMessage" && finished && !answerFinal:
+				out.Text = item.Text
+			default:
+				continue
+			}
+			if strings.TrimSpace(out.Text) == "" {
+				continue
+			}
+			switch {
+			case item.CompletedAtMs > 0:
+				out.Timestamp = time.UnixMilli(item.CompletedAtMs)
+			case item.StartedAtMs > 0:
+				out.Timestamp = time.UnixMilli(item.StartedAtMs)
+			case !out.FromUser && t.CompletedAt > 0:
+				out.Timestamp = time.Unix(t.CompletedAt, 0)
+			case t.StartedAt > 0:
+				out.Timestamp = time.Unix(t.StartedAt, 0)
+			}
+			if out.FromUser {
+				prompt = &out
+			} else {
+				answer = &out
+				answerFinal = item.Phase == "final_answer" || item.Phase == "finalAnswer"
+			}
+		}
+		for _, item := range []*TaskItem{prompt, answer} {
+			if item != nil {
+				result = append(result, *item)
+			}
+		}
+	}
+	return result, nil
 }

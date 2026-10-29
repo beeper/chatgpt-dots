@@ -259,7 +259,12 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 						watch.TaskFailures = make(map[string]int)
 					}
 					watch.TaskFailures[threadID]++
-					c.login.Log.Warn().Err(err).Str("task_id", threadID).Int("attempt", watch.TaskFailures[threadID]).Msg("Could not bridge ChatGPT task replies")
+					log := c.login.Log.Warn().Err(err).Str("task_id", threadID).Int("attempt", watch.TaskFailures[threadID])
+					var httpErr *chatgpt.HTTPError
+					if errors.As(err, &httpErr) {
+						log = log.Str("path", httpErr.Path).Str("detail", httpErr.Detail)
+					}
+					log.Msg("Could not bridge ChatGPT task replies")
 				}
 				if err == nil || watch.TaskFailures[threadID] >= taskItemAttempts {
 					if watch.TaskSynced == nil {
