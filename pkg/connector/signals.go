@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
+	"github.com/coder/websocket"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -102,6 +103,9 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 		evt := c.login.Log.Warn().Err(err)
 		var disconnected chatgpt.StreamDisconnectedError
 		if errors.As(err, &disconnected) {
+			if disconnected.CloseStatus == websocket.StatusNormalClosure && disconnected.Subscribed && !disconnected.PingFailed {
+				evt = c.login.Log.Debug().Err(err)
+			}
 			evt = evt.Int("close_status", int(disconnected.CloseStatus)).
 				Bool("ping_failed", disconnected.PingFailed).
 				Bool("subscribed", disconnected.Subscribed).
