@@ -9,6 +9,7 @@ import (
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/variationselector"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -21,7 +22,7 @@ func (c *Client) PreHandleMatrixReaction(_ context.Context, msg *bridgev2.Matrix
 	if isTaskItem(msg.TargetMessage.ID) {
 		return bridgev2.MatrixReactionPreResponse{}, errors.New("ChatGPT doesn't support reactions on task replies")
 	}
-	emoji := msg.Content.RelatesTo.Key
+	emoji := variationselector.FullyQualify(msg.Content.RelatesTo.Key)
 	if emoji == "" || strings.HasPrefix(emoji, "mxc://") {
 		return bridgev2.MatrixReactionPreResponse{}, errors.New("ChatGPT Dots requires an emoji reaction")
 	}
