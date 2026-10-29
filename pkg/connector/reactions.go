@@ -9,6 +9,7 @@ import (
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/variationselector"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -18,7 +19,10 @@ func (c *Client) PreHandleMatrixReaction(_ context.Context, msg *bridgev2.Matrix
 	if msg.TargetMessage == nil || msg.TargetMessage.ID == "" || msg.Portal == nil || msg.TargetMessage.Room != msg.Portal.PortalKey || msg.TargetMessage.Room.Receiver != c.login.ID {
 		return bridgev2.MatrixReactionPreResponse{}, errors.New("reaction target belongs to another Dot chat")
 	}
-	emoji := msg.Content.RelatesTo.Key
+	if isTaskItem(msg.TargetMessage.ID) {
+		return bridgev2.MatrixReactionPreResponse{}, errors.New("ChatGPT doesn't support reactions on task replies")
+	}
+	emoji := variationselector.FullyQualify(msg.Content.RelatesTo.Key)
 	if emoji == "" || strings.HasPrefix(emoji, "mxc://") {
 		return bridgev2.MatrixReactionPreResponse{}, errors.New("ChatGPT Dots requires an emoji reaction")
 	}
@@ -33,7 +37,7 @@ func (c *Client) reactionClient(ctx context.Context, portal *bridgev2.Portal, ro
 	if portal == nil || room != portal.PortalKey || room.Receiver != c.login.ID || state == nil {
 		return nil, nil, nil, nil, relinkStatus(errors.New("refusing reaction in an unverified Dot room"), true)
 	}
-	if api == nil || generation == nil || generation.Err() != nil || !c.connected.Load() {
+	if api == nil || generation == nil || generation.Err() != nil || !c.IsLoggedIn() {
 		return nil, nil, nil, nil, wrapSendError(errors.New("not connected to ChatGPT"), true)
 	}
 	ctx, cancel := context.WithCancel(ctx)

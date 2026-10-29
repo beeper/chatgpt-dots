@@ -46,7 +46,9 @@ func (c *Client) matrixReplyTarget(msg *bridgev2.MatrixMessage) (string, error) 
 			return "", errors.New("reply target belongs to another Dot chat")
 		}
 	}
-	if msg.ReplyTo != nil {
+	if msg.ReplyTo != nil && isTaskItem(msg.ReplyTo.ID) {
+		return string(msg.ReplyTo.ThreadRoot), nil
+	} else if msg.ReplyTo != nil {
 		return string(msg.ReplyTo.ID), nil
 	} else if msg.ThreadRoot != nil {
 		return string(msg.ThreadRoot.ID), nil

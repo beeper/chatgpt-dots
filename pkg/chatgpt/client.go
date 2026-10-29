@@ -133,6 +133,9 @@ func newHTTPError(resp *http.Response) *HTTPError {
 	}
 	var body struct {
 		Detail any `json:"detail"`
+		Error  struct {
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body) == nil {
 		switch detail := body.Detail.(type) {
@@ -141,6 +144,8 @@ func newHTTPError(resp *http.Response) *HTTPError {
 		case map[string]any:
 			message, _ := detail["message"].(string)
 			failure.Detail = strings.TrimSpace(message)
+		case nil:
+			failure.Detail = strings.TrimSpace(body.Error.Message)
 		}
 	}
 	return failure

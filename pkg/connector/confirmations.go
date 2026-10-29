@@ -90,7 +90,7 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	api, run := client.api, client.runContext
 	room := client.meta.Rooms[string(ce.Portal.ID)]
 	client.mu.RUnlock()
-	if api == nil || run == nil || run.Err() != nil || !client.connected.Load() || room == nil || login.Client != client {
+	if api == nil || run == nil || run.Err() != nil || !client.IsLoggedIn() || room == nil || login.Client != client {
 		return "", false, errors.New("Reconnect this Dot before answering its confirmation")
 	}
 	ctx, cancel := context.WithTimeout(ce.Ctx, 45*time.Second)
