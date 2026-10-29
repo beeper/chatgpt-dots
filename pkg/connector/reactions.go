@@ -74,7 +74,7 @@ func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixR
 	defer finish()
 	if err = api.SetReaction(ctx, state.Profile.Room, string(msg.TargetMessage.ID), &pre.Emoji); err != nil {
 		c.logReactionFailure(ctx, err, "add_reaction", pre.Emoji, msg.TargetMessage)
-		return nil, wrapSendError(err, false)
+		return nil, wrapSendError(err, isRejection(err))
 	}
 	c.requestSync(true)
 	return &database.Reaction{Emoji: pre.Emoji}, nil
@@ -105,7 +105,7 @@ func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.M
 	}
 	if err = api.SetReaction(ctx, state.Profile.Room, string(target.MessageID), nil); err != nil {
 		c.logReactionFailure(ctx, err, "remove_reaction", target.Emoji, nil)
-		return wrapSendError(err, false)
+		return wrapSendError(err, isRejection(err))
 	}
 	c.requestSync(true)
 	return nil
