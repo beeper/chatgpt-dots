@@ -156,7 +156,6 @@ type Client struct {
 	rooms              map[string]bool
 	mu                 sync.RWMutex
 	authMu             sync.Mutex
-	taskItemsView      int
 	PersistCredentials func(Credentials) error
 }
 
