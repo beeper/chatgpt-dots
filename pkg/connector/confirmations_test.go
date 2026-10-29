@@ -102,7 +102,6 @@ func TestConfirmationCommandPersistenceAndOwnership(t *testing.T) {
 				t.Fatal(err)
 			}
 			client.api, client.runContext = api, ctx
-			client.connected.Store(true)
 			user := &bridgev2.User{User: &database.User{MXID: "@owner:test"}}
 			ce := &commands.Event{Ctx: ctx, Portal: &bridgev2.Portal{Portal: portal}, User: user, RoomID: portal.MXID, OrigRoomID: portal.MXID, EventID: "$decision", ReplyTo: target.MXID, Command: "accept"}
 			m.Content.Elicitation.Params.Message = "A changed rule"
@@ -161,8 +160,8 @@ func TestConfirmationCommandPersistenceAndOwnership(t *testing.T) {
 			if _, _, err = connector.runConfirmationCommand(ce); err == nil {
 				t.Fatal("another account could inspect confirmation")
 			}
-			if !client.connected.Load() {
-				t.Fatal("confirmation failure disconnected account")
+			if !client.IsLoggedIn() {
+				t.Fatal("confirmation failure logged out account")
 			}
 		})
 	}

@@ -99,7 +99,6 @@ func TestOutgoingReplyReconcilesWithoutResending(t *testing.T) {
 	}
 	client = login.Client.(*Client)
 	client.api, client.runContext = oldAPI, context.Background()
-	client.connected.Store(true)
 	response, err := client.HandleMatrixMessage(context.Background(), message)
 	if err != nil || response == nil || response.DB.ID != "accepted" || response.DB.ThreadRoot != "root" || posts != 1 {
 		t.Fatalf("uncertain reply was resent or not reconciled: %+v %v posts=%d", response, err, posts)
