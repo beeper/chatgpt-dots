@@ -147,7 +147,7 @@ func (c *Client) TaskTurns(ctx context.Context, room string, message Message, th
 				stop = true
 				break
 			}
-			turn.Items = taskTurnItems(t.Items, turn.Finished)
+			turn.Items = taskTurnItems(t.Items, turn.Finished, t.StartedAt, t.CompletedAt)
 			turns = append(turns, turn)
 		}
 		if stop || page.NextCursor == "" || seen[page.NextCursor] {
@@ -160,7 +160,7 @@ func (c *Client) TaskTurns(ctx context.Context, room string, message Message, th
 	return turns, nil
 }
 
-func taskTurnItems(raw []json.RawMessage, finished bool) []TaskItem {
+func taskTurnItems(raw []json.RawMessage, finished bool, startedAt, completedAt int64) []TaskItem {
 	var prompt, answer *TaskItem
 	answerFinal := false
 	for _, data := range raw {
@@ -204,6 +204,11 @@ func taskTurnItems(raw []json.RawMessage, finished bool) []TaskItem {
 		}
 		if strings.TrimSpace(out.Text) == "" {
 			continue
+		}
+		if out.Timestamp.IsZero() && out.FromUser && startedAt > 0 {
+			out.Timestamp = time.Unix(startedAt, 0)
+		} else if out.Timestamp.IsZero() && !out.FromUser && completedAt > 0 {
+			out.Timestamp = time.Unix(completedAt, 0)
 		}
 		if out.FromUser {
 			prompt = &out
