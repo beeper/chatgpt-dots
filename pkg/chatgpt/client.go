@@ -122,6 +122,7 @@ type HTTPError struct {
 	Path               string
 	Challenge          bool
 	PrimaryUnavailable bool
+	Detail             string
 }
 
 func newHTTPError(resp *http.Response) *HTTPError {
@@ -221,11 +222,19 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		failure := newHTTPError(resp)
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		var body struct {
+			Detail json.RawMessage `json:"detail"`
+		}
+		if json.Unmarshal(raw, &body) == nil && len(body.Detail) > 0 {
+			raw = body.Detail
+		}
+		failure.Detail = strings.TrimSpace(string(raw))
+		if len(failure.Detail) > 500 {
+			failure.Detail = failure.Detail[:500]
+		}
 		if resp.StatusCode == http.StatusNotFound && req.URL.Path == "/backend-api/tbo/primary" {
-			var body struct {
-				Detail string `json:"detail"`
-			}
-			failure.PrimaryUnavailable = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body) == nil && body.Detail == "Not Found"
+			failure.PrimaryUnavailable = string(body.Detail) == `"Not Found"`
 		}
 		return failure
 	}
