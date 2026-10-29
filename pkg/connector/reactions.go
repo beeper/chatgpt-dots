@@ -18,6 +18,9 @@ func (c *Client) PreHandleMatrixReaction(_ context.Context, msg *bridgev2.Matrix
 	if msg.TargetMessage == nil || msg.TargetMessage.ID == "" || msg.Portal == nil || msg.TargetMessage.Room != msg.Portal.PortalKey || msg.TargetMessage.Room.Receiver != c.login.ID {
 		return bridgev2.MatrixReactionPreResponse{}, errors.New("reaction target belongs to another Dot chat")
 	}
+	if isTaskItem(msg.TargetMessage.ID) {
+		return bridgev2.MatrixReactionPreResponse{}, errors.New("ChatGPT doesn't support reactions on task replies")
+	}
 	emoji := msg.Content.RelatesTo.Key
 	if emoji == "" || strings.HasPrefix(emoji, "mxc://") {
 		return bridgev2.MatrixReactionPreResponse{}, errors.New("ChatGPT Dots requires an emoji reaction")

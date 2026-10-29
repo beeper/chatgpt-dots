@@ -7,21 +7,85 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
+	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/bridgev2/simplevent"
+	"maunium.net/go/mautrix/event"
 )
 
 const taskWatchExpiry = time.Hour
 
 type threadMessage struct {
-	Room        *RoomState
-	Message     chatgpt.Message
-	NextRefresh time.Time
-	Backoff     time.Duration
+	Room         *RoomState
+	Message      chatgpt.Message
+	NextRefresh  time.Time
+	Backoff      time.Duration
+	TaskSynced   map[string]string
+	TaskBridged  map[networkid.MessageID]bool
+	TaskFailures map[string]int
+}
+
+const (
+	taskItemPrefix   = "task:"
+	taskItemAttempts = 5
+)
+
+func taskItemID(threadID, itemID string) networkid.MessageID {
+	return networkid.MessageID(taskItemPrefix + threadID + ":" + itemID)
+}
+
+func isTaskItem(id networkid.MessageID) bool {
+	return strings.HasPrefix(string(id), taskItemPrefix)
+}
+
+func taskSyncKey(thread *chatgpt.ThreadStatus) string {
+	return thread.TurnID + "\x00" + thread.Status + "\x00" + strconv.FormatInt(thread.UpdatedAt, 10)
+}
+
+func (c *Client) bridgeTaskItems(ctx context.Context, api *chatgpt.Client, watch *threadMessage, request chatgpt.Message, threadID string) error {
+	items, err := api.TaskItems(ctx, watch.Room.Profile.Room, request, threadID)
+	if err != nil {
+		return err
+	}
+	root := networkid.MessageID(watch.Message.ID)
+	if watch.Message.ReplyRootMessageID != "" {
+		root = networkid.MessageID(watch.Message.ReplyRootMessageID)
+	}
+	for _, item := range items {
+		id := taskItemID(threadID, item.ID)
+		if watch.TaskBridged[id] {
+			continue
+		}
+		sender := bridgev2.EventSender{Sender: c.dotID(watch.Room)}
+		if item.FromUser {
+			sender = bridgev2.EventSender{Sender: c.GetUserID(), SenderLogin: c.login.ID, IsFromMe: true}
+		}
+		timestamp := item.Timestamp
+		if timestamp.IsZero() {
+			timestamp = time.Now()
+		}
+		content := renderText(item.Text)
+		cutOffLongText(c.login.Log, content, maxMatrixContentBytes)
+		result := c.login.QueueRemoteEvent(&simplevent.PreConvertedMessage{
+			EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventMessage, PortalKey: c.key(watch.Room), Sender: sender, Timestamp: timestamp},
+			ID:        id,
+			Data:      &bridgev2.ConvertedMessage{ThreadRoot: &root, Parts: []*bridgev2.ConvertedMessagePart{{Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{}}}},
+		})
+		if !result.Success {
+			return errors.New("bridge could not queue ChatGPT task reply")
+		}
+		if watch.TaskBridged == nil {
+			watch.TaskBridged = make(map[networkid.MessageID]bool)
+		}
+		watch.TaskBridged[id] = true
+	}
+	return nil
 }
 
 func threadsSettled(threads map[string]*chatgpt.ThreadStatus) bool {
@@ -185,6 +249,28 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 			}
 			changed = changed || previous == nil || *next != *previous
 			message.Threads[threadID] = next
+			if key := taskSyncKey(next); watch.TaskSynced[threadID] != key {
+				err = c.bridgeTaskItems(ctx, api, watch, request, threadID)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if err != nil {
+					if watch.TaskFailures == nil {
+						watch.TaskFailures = make(map[string]int)
+					}
+					watch.TaskFailures[threadID]++
+					c.login.Log.Warn().Err(err).Str("task_id", threadID).Int("attempt", watch.TaskFailures[threadID]).Msg("Could not bridge ChatGPT task replies")
+				}
+				if err == nil || watch.TaskFailures[threadID] >= taskItemAttempts {
+					if watch.TaskSynced == nil {
+						watch.TaskSynced = make(map[string]string)
+					}
+					watch.TaskSynced[threadID] = key
+					delete(watch.TaskFailures, threadID)
+				} else {
+					failed = true
+				}
+			}
 			allTerminal = allTerminal && next.Terminal()
 		}
 		watch.Message = message
