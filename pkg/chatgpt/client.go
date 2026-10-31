@@ -259,10 +259,57 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 	if out == nil {
 		return nil
 	}
-	if err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out); err != nil {
-		return errors.New("unexpected ChatGPT response schema")
+	limited := &io.LimitedReader{R: resp.Body, N: maxResponseBytes}
+	if err = json.NewDecoder(limited).Decode(out); err != nil {
+		return newSchemaError(resp, limited, err)
 	}
 	return nil
+}
+
+const maxResponseBytes = 4 << 20
+
+type SchemaError struct {
+	Path          string
+	Status        int
+	ContentLength int64
+	BytesRead     int64
+	Truncated     bool
+	Cause         string
+	Field         string
+	Offset        int64
+}
+
+func (e *SchemaError) Error() string {
+	return "unexpected ChatGPT response schema"
+}
+
+func newSchemaError(resp *http.Response, limited *io.LimitedReader, err error) *SchemaError {
+	failure := &SchemaError{
+		Path:          resp.Request.URL.Path,
+		Status:        resp.StatusCode,
+		ContentLength: resp.ContentLength,
+		BytesRead:     maxResponseBytes - limited.N,
+	}
+	if limited.N == 0 {
+		var next [1]byte
+		n, _ := resp.Body.Read(next[:])
+		failure.Truncated = n > 0
+	}
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &syntaxErr):
+		failure.Cause, failure.Offset = "syntax", syntaxErr.Offset
+	case errors.As(err, &typeErr):
+		failure.Cause, failure.Field, failure.Offset = "type "+typeErr.Value, typeErr.Field, typeErr.Offset
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		failure.Cause = "unexpected eof"
+	case errors.Is(err, io.EOF):
+		failure.Cause = "empty body"
+	default:
+		failure.Cause = fmt.Sprintf("%T", err)
+	}
+	return failure
 }
 func (c *Client) Credentials() Credentials {
 	c.authMu.Lock()
