@@ -259,14 +259,28 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 	if out == nil {
 		return nil
 	}
-	limited := &io.LimitedReader{R: resp.Body, N: maxResponseBytes}
-	if err = json.NewDecoder(limited).Decode(out); err != nil {
-		return newSchemaError(resp, limited, err)
+	limit := int64(maxResponseBytes)
+	stream, streamed := out.(jsonStreamDecoder)
+	if streamed {
+		limit = maxStreamedResponseBytes
+	}
+	limited := &io.LimitedReader{R: resp.Body, N: limit}
+	dec := json.NewDecoder(limited)
+	if streamed {
+		err = stream.decodeJSONStream(dec)
+	} else {
+		err = dec.Decode(out)
+	}
+	if err != nil {
+		return newSchemaError(resp, limited, limit, err)
 	}
 	return nil
 }
 
-const maxResponseBytes = 4 << 20
+const (
+	maxResponseBytes         = 4 << 20
+	maxStreamedResponseBytes = 64 << 20
+)
 
 type SchemaError struct {
 	Path          string
@@ -283,12 +297,12 @@ func (e *SchemaError) Error() string {
 	return "unexpected ChatGPT response schema"
 }
 
-func newSchemaError(resp *http.Response, limited *io.LimitedReader, err error) *SchemaError {
+func newSchemaError(resp *http.Response, limited *io.LimitedReader, limit int64, err error) *SchemaError {
 	failure := &SchemaError{
 		Path:          resp.Request.URL.Path,
 		Status:        resp.StatusCode,
 		ContentLength: resp.ContentLength,
-		BytesRead:     maxResponseBytes - limited.N,
+		BytesRead:     limit - limited.N,
 	}
 	if limited.N == 0 {
 		var next [1]byte
