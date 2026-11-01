@@ -127,16 +127,7 @@ func (c *Client) TaskTurns(ctx context.Context, room string, message Message, th
 		if cursor != "" {
 			query.Set("cursor", cursor)
 		}
-		var page struct {
-			Data []struct {
-				ID          string            `json:"id"`
-				Status      string            `json:"status"`
-				Items       []json.RawMessage `json:"items"`
-				StartedAt   int64             `json:"startedAt"`
-				CompletedAt int64             `json:"completedAt"`
-			} `json:"data"`
-			NextCursor string `json:"nextCursor"`
-		}
+		var page taskTurnPage
 		if err := c.doAt(ctx, taskOrigin, "GET", "/v2/threads/"+url.PathEscape(threadID)+"/turns?"+query.Encode(), nil, &page); err != nil {
 			return nil, err
 		}
@@ -160,26 +151,101 @@ func (c *Client) TaskTurns(ctx context.Context, room string, message Message, th
 	return turns, nil
 }
 
-func taskTurnItems(raw []json.RawMessage, finished bool, startedAt, completedAt int64) []TaskItem {
+type taskTurnPage struct {
+	Data       []taskTurnData
+	NextCursor string
+}
+
+type taskTurnData struct {
+	ID          string
+	Status      string
+	Items       []taskTurnItem
+	StartedAt   int64
+	CompletedAt int64
+}
+
+type taskTurnItem struct {
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Output    string `json:"output"`
+	Text      string `json:"text"`
+	Phase     string `json:"phase"`
+	Content   []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	StartedAtMs   int64 `json:"startedAtMs"`
+	CompletedAtMs int64 `json:"completedAtMs"`
+}
+
+func (item *taskTurnItem) bridged() bool {
+	switch item.Type {
+	case "userMessage", "agentMessage":
+		return true
+	case "functionCallOutput":
+		return item.Namespace == "cloud_threads" && item.Name == "send_message"
+	}
+	return false
+}
+
+func (p *taskTurnPage) decodeJSONStream(dec *json.Decoder) error {
+	return decodeJSONObject(dec, func(key string) error {
+		switch key {
+		case "data":
+			return decodeJSONArray(dec, func() error {
+				var turn taskTurnData
+				if err := turn.decodeJSONStream(dec); err != nil {
+					return err
+				}
+				p.Data = append(p.Data, turn)
+				return nil
+			})
+		case "nextCursor":
+			return dec.Decode(&p.NextCursor)
+		default:
+			return skipJSONValue(dec)
+		}
+	})
+}
+
+func (t *taskTurnData) decodeJSONStream(dec *json.Decoder) error {
+	return decodeJSONObject(dec, func(key string) error {
+		switch key {
+		case "id":
+			return dec.Decode(&t.ID)
+		case "status":
+			return dec.Decode(&t.Status)
+		case "startedAt":
+			return dec.Decode(&t.StartedAt)
+		case "completedAt":
+			return dec.Decode(&t.CompletedAt)
+		case "items":
+			return decodeJSONArray(dec, func() error {
+				var item taskTurnItem
+				var typeErr *json.UnmarshalTypeError
+				if err := dec.Decode(&item); errors.As(err, &typeErr) {
+					return nil
+				} else if err != nil {
+					return err
+				}
+				if item.bridged() {
+					t.Items = append(t.Items, item)
+				}
+				return nil
+			})
+		default:
+			return skipJSONValue(dec)
+		}
+	})
+}
+
+func taskTurnItems(raw []taskTurnItem, finished bool, startedAt, completedAt int64) []TaskItem {
 	var prompt, answer *TaskItem
 	answerFinal := false
-	for _, data := range raw {
-		var item struct {
-			Type      string `json:"type"`
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			Namespace string `json:"namespace"`
-			Output    string `json:"output"`
-			Text      string `json:"text"`
-			Phase     string `json:"phase"`
-			Content   []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-			StartedAtMs   int64 `json:"startedAtMs"`
-			CompletedAtMs int64 `json:"completedAtMs"`
-		}
-		if json.Unmarshal(data, &item) != nil || item.ID == "" {
+	for _, item := range raw {
+		if item.ID == "" {
 			continue
 		}
 		out := TaskItem{ID: item.ID}
