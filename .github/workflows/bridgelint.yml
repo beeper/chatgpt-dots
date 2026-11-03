@@ -1,0 +1,30 @@
+name: bridgelint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -tags=goolm
+
+jobs:
+  bridgelint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install bridgelint
+        run: go install github.com/beeper/pre-commit-go/bridgelint@v0.5.0
+
+      - name: Run bridgelint
+        run: bridgelint ./...
