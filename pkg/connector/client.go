@@ -578,6 +578,13 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 				pending = errors.Join(pending, err)
 			}
 		}
+		after := state.Cursor
+		if len(state.Overlap) > 0 {
+			after = state.Overlap[0]
+		}
+		if full {
+			after = state.Baseline
+		}
 		c.mu.RLock()
 		var pendingIDs []string
 		for requestID, pending := range c.meta.Pending {
@@ -587,25 +594,18 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 		}
 		c.mu.RUnlock()
 		for _, requestID := range pendingIDs {
-			m, err := c.findRequest(ctx, api, state, requestID)
+			m, err := c.findRequest(ctx, api, state, requestID, after)
 			if err != nil {
 				return err
 			}
 			if m != nil {
-				if err = c.deliverMedia(ctx, state, *m, state.Baseline); err != nil {
+				if err = c.deliverMedia(ctx, state, *m, after); err != nil {
 					if !onlyMediaRetries(err) {
 						return err
 					}
 					pending = errors.Join(pending, err)
 				}
 			}
-		}
-		after := state.Cursor
-		if len(state.Overlap) > 0 {
-			after = state.Overlap[0]
-		}
-		if full {
-			after = state.Baseline
 		}
 		seen := map[string]bool{}
 		for {
@@ -1017,7 +1017,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 		return nil, err
 	}
 	if retry && !pending.KnownUnsent {
-		found, err := c.findRequest(ctx, api, state, requestID)
+		found, err := c.findRequest(ctx, api, state, requestID, state.Baseline)
 		if err != nil {
 			return nil, wrapSendError(err, false)
 		}
@@ -1107,14 +1107,13 @@ func (c *Client) sendResponse(m chatgpt.Message, media bool, generation context.
 		}
 	}}
 }
-func (c *Client) findRequest(ctx context.Context, api *chatgpt.Client, state *RoomState, requestID string) (*chatgpt.Message, error) {
+func (c *Client) findRequest(ctx context.Context, api *chatgpt.Client, state *RoomState, requestID, after string) (*chatgpt.Message, error) {
 	c.mu.RLock()
 	replyTo := c.meta.Pending[requestID].ReplyTo
 	c.mu.RUnlock()
 	if replyTo != "" {
 		return c.findReplyRequest(ctx, api, state, requestID, replyTo)
 	}
-	after := state.Baseline
 	seen := map[string]bool{}
 	for !seen[after] {
 		seen[after] = true
