@@ -184,7 +184,7 @@ func (c *Client) run(ctx context.Context) {
 		}
 		return c.connector.writeCredentials(ctx, c.login, updated)
 	}
-	for c.connectDot(ctx, api, proxy) && c.serve(ctx, api, proxy) {
+	for c.connectDot(ctx, api, proxy) && c.serve(ctx, api, proxy) && wait(ctx, dotRecheckInterval) {
 	}
 }
 func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *proxyTransport) bool {
@@ -243,7 +243,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 			}
 			if profileErr := c.verify(ctx, api, avatars); errors.Is(profileErr, errDotUnavailable) {
 				c.state(profileErr)
-				return wait(ctx, dotRecheckInterval)
+				return true
 			} else if profileErr != nil {
 				c.login.Log.Warn().Err(profileErr).Msg("Could not refresh ChatGPT profiles")
 			}
