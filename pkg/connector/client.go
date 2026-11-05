@@ -30,6 +30,7 @@ const (
 	pollInterval          = 3 * time.Second
 	livePollInterval      = 30 * time.Second
 	avatarRefreshInterval = 30 * time.Minute
+	dotRecheckInterval    = 5 * time.Minute
 )
 
 type Client struct {
@@ -183,22 +184,34 @@ func (c *Client) run(ctx context.Context) {
 		}
 		return c.connector.writeCredentials(ctx, c.login, updated)
 	}
+	for c.connectDot(ctx, api, proxy) && c.serve(ctx, api, proxy) && wait(ctx, dotRecheckInterval) {
+	}
+}
+func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *proxyTransport) bool {
 	delay := time.Second * 3
 	for ctx.Err() == nil {
-		if err = proxy.update(ctx, "connect"); err == nil {
+		err := proxy.update(ctx, "connect")
+		if err == nil {
 			err = c.verify(ctx, api, true)
 		}
 		if err == nil {
-			break
+			return true
 		}
-		if c.state(err) || !wait(ctx, delay) {
-			return
+		next := delay
+		if errors.Is(err, errDotUnavailable) {
+			c.state(err)
+			next = dotRecheckInterval
+		} else if c.state(err) {
+			return false
+		}
+		if !wait(ctx, next) {
+			return false
 		}
 		delay = min(delay*2, time.Minute)
 	}
-	if ctx.Err() != nil {
-		return
-	}
+	return false
+}
+func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTransport) bool {
 	c.mu.Lock()
 	c.api = api
 	c.mu.Unlock()
@@ -209,12 +222,12 @@ func (c *Client) run(ctx context.Context) {
 		c.streamSignals(streamCtx, api)
 	}()
 	defer func() { stopStream(); <-streamDone }()
-	delay = pollInterval
+	delay := pollInterval
 	nextProfileRefresh := time.Now().Add(time.Minute)
 	nextAvatarRefresh := time.Now().Add(avatarRefreshInterval)
 	var nextPoll time.Time
 	for ctx.Err() == nil {
-		err = nil
+		var err error
 		if !time.Now().Before(nextPoll) {
 			err = c.poll(ctx, api)
 			nextPoll = time.Now().Add(pollInterval)
@@ -230,14 +243,14 @@ func (c *Client) run(ctx context.Context) {
 			}
 			if profileErr := c.verify(ctx, api, avatars); errors.Is(profileErr, errDotUnavailable) {
 				c.state(profileErr)
-				return
+				return true
 			} else if profileErr != nil {
 				c.login.Log.Warn().Err(profileErr).Msg("Could not refresh ChatGPT profiles")
 			}
 			nextProfileRefresh = time.Now().Add(time.Minute)
 		}
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		if proxy.failed.Load() {
 			if proxyErr := proxy.update(ctx, "connect"); proxyErr != nil {
@@ -247,10 +260,10 @@ func (c *Client) run(ctx context.Context) {
 		}
 		if err != nil && !onlyMediaRetries(err) {
 			if ctx.Err() != nil {
-				return
+				return false
 			}
 			if c.state(err) {
-				return
+				return false
 			}
 			delay = min(delay*2, time.Minute)
 			nextPoll = time.Time{}
@@ -265,13 +278,14 @@ func (c *Client) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return
+			return false
 		case <-c.signalWake:
 			timer.Stop()
 			nextPoll = time.Time{}
 		case <-timer.C:
 		}
 	}
+	return false
 }
 func wait(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
