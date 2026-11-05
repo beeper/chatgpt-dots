@@ -71,7 +71,9 @@ func (c *Client) DownloadAttachment(ctx context.Context, room, fileID string) (*
 		return nil, errors.New("invalid attachment download request")
 	}
 	req.Header.Set("User-Agent", "BeeperDotsBridge/0.1")
-	resp, err := c.http.Do(req)
+	storage := *c.http
+	storage.Timeout = 0
+	resp, err := storage.Do(req)
 	if err != nil {
 		return nil, &AttachmentStorageError{Reason: "attachment storage download failed"}
 	}
