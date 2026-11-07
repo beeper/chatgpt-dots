@@ -60,7 +60,7 @@ func (c *Client) Upload(ctx context.Context, room, filename, contentType string,
 	buffer.Grow(len(data) + 1024)
 	writer := multipart.NewWriter(&buffer)
 	headers := textproto.MIMEHeader{}
-	headers.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": "file", "filename": filename}))
+	headers.Set("Content-Disposition", `form-data; name="file"; filename="`+strings.ReplaceAll(filename, `"`, "%22")+`"`)
 	headers.Set("Content-Type", parsed)
 	part, err := writer.CreatePart(headers)
 	if err != nil {
