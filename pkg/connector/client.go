@@ -122,6 +122,8 @@ func (c *Client) state(err error) bool {
 	var httpErr *chatgpt.HTTPError
 	if errors.Is(err, errDotUnavailable) {
 		state = badCredentialsState(stateDotUnavailable, err)
+	} else if errors.Is(err, errDotMissing) {
+		state.Error = stateDotMissing
 	} else if errors.As(err, &httpErr) {
 		c.login.Log.Warn().Err(err).
 			Int("status", httpErr.Status).
@@ -184,10 +186,12 @@ func (c *Client) run(ctx context.Context) {
 		}
 		return c.connector.writeCredentials(ctx, c.login, updated)
 	}
-	for c.connectDot(ctx, api, proxy) && c.serve(ctx, api, proxy) && wait(ctx, dotRecheckInterval) {
+	recheck := false
+	for c.connectDot(ctx, api, proxy, recheck) && c.serve(ctx, api, proxy) && wait(ctx, dotRecheckInterval) {
+		recheck = true
 	}
 }
-func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *proxyTransport) bool {
+func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *proxyTransport, recheck bool) bool {
 	delay := time.Second * 3
 	for ctx.Err() == nil {
 		err := proxy.update(ctx, "connect")
@@ -198,8 +202,12 @@ func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *pro
 			return true
 		}
 		next := delay
-		if errors.Is(err, errDotUnavailable) {
+		if errors.Is(err, errDotMissing) && recheck {
+			err = fmt.Errorf("%w: %w", errDotUnavailable, err)
+		}
+		if errors.Is(err, errDotUnavailable) || errors.Is(err, errDotMissing) {
 			c.state(err)
+			recheck = true
 			next = dotRecheckInterval
 		} else if c.state(err) {
 			return false
@@ -241,7 +249,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 			if avatars {
 				nextAvatarRefresh = time.Now().Add(avatarRefreshInterval)
 			}
-			if profileErr := c.verify(ctx, api, avatars); errors.Is(profileErr, errDotUnavailable) {
+			if profileErr := c.verify(ctx, api, avatars); errors.Is(profileErr, errDotUnavailable) || errors.Is(profileErr, errDotMissing) {
 				c.state(profileErr)
 				return true
 			} else if profileErr != nil {
@@ -370,8 +378,10 @@ func (c *Client) checkDotReplaced(ctx context.Context, api *chatgpt.Client, stat
 		Bool("primary_dot_replaced", replaced).
 		Bool("primary_dot_unknown", discoverErr != nil && !missing).
 		Msg("The linked Dot room returned HTTP 404")
-	if missing || replaced {
+	if replaced {
 		return fmt.Errorf("%w: %w", errDotUnavailable, err)
+	} else if missing {
+		return fmt.Errorf("%w: %w", errDotMissing, err)
 	}
 	return err
 }
