@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ type Identity struct {
 	Account, User string
 	AccountUser   string
 	Email         string
+	Issued        time.Time
 	Expires       time.Time
 }
 
@@ -41,6 +43,7 @@ func (c Credentials) Identity() (Identity, error) {
 		return out, errors.New("invalid access token encoding")
 	}
 	var claims struct {
+		Iat  int64 `json:"iat"`
 		Exp  int64 `json:"exp"`
 		Auth struct {
 			Account     string `json:"chatgpt_account_id"`
@@ -54,7 +57,7 @@ func (c Credentials) Identity() (Identity, error) {
 	if json.Unmarshal(data, &claims) != nil || claims.Auth.Account == "" || claims.Auth.User == "" || claims.Exp == 0 {
 		return out, errors.New("access token has no supported ChatGPT account identity")
 	}
-	out = Identity{Account: claims.Auth.Account, User: claims.Auth.User, AccountUser: claims.Auth.AccountUser, Email: claims.Profile.Email, Expires: time.Unix(claims.Exp, 0)}
+	out = Identity{Account: claims.Auth.Account, User: claims.Auth.User, AccountUser: claims.Auth.AccountUser, Email: claims.Profile.Email, Issued: time.Unix(claims.Iat, 0), Expires: time.Unix(claims.Exp, 0)}
 	return out, nil
 }
 
@@ -339,11 +342,14 @@ func (c *Client) refresh(ctx context.Context) error {
 	if c.credentials.SessionToken == "" {
 		return &HTTPError{Status: 401}
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://chatgpt.com/api/auth/session", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://chatgpt.com/api/auth/session?refresh=true&reason=token_expired", nil)
 	if err != nil {
 		return errors.New("cannot prepare ChatGPT renewal")
 	}
 	req.Header.Set("Authorization", "Bearer "+c.credentials.AccessToken)
+	if current, err := c.credentials.Identity(); err == nil && current.Issued.Unix() > 0 {
+		req.Header.Set("X-OpenAI-Failed-Access-Token-Iat", strconv.FormatInt(current.Issued.Unix(), 10))
+	}
 	req.Header.Set("User-Agent", "BeeperDotsBridge/0.1")
 	req.AddCookie(&http.Cookie{Name: "__Secure-next-auth.session-token", Value: c.credentials.SessionToken})
 	resp, err := c.http.Do(req)
@@ -375,6 +381,7 @@ func (c *Client) refresh(ctx context.Context) error {
 		}
 	}
 	c.credentials = updated
+	c.Identity.Issued = identity.Issued
 	c.Identity.Expires = identity.Expires
 	return nil
 }
