@@ -109,10 +109,10 @@ func (c *Client) LogoutRemote(context.Context) {
 func (c *Client) sendState(state status.BridgeState) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	switch state.StateEvent {
-	case status.StateBadCredentials:
+	switch {
+	case state.StateEvent == status.StateBadCredentials, state.Error == stateDotMissing:
 		c.loggedOut.Store(true)
-	case status.StateConnected:
+	case state.StateEvent == status.StateConnected:
 		c.loggedOut.Store(false)
 	}
 	c.login.BridgeState.Send(state)
