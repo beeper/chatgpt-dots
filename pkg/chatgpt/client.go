@@ -381,6 +381,7 @@ func (c *Client) refresh(ctx context.Context) error {
 		}
 	}
 	c.credentials = updated
+	c.Identity.Issued = identity.Issued
 	c.Identity.Expires = identity.Expires
 	return nil
 }
