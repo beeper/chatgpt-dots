@@ -28,6 +28,7 @@ const (
 	stateCredentialCleanupFailed status.BridgeStateErrorCode = "chatgpt-credential-cleanup-failed"
 	stateRestoreFailed           status.BridgeStateErrorCode = "chatgpt-restore-failed"
 	stateDotUnavailable          status.BridgeStateErrorCode = "chatgpt-dot-unavailable"
+	stateDotMissing              status.BridgeStateErrorCode = "chatgpt-dot-missing"
 )
 
 func init() {
@@ -46,6 +47,7 @@ func init() {
 		stateCredentialCleanupFailed: "Couldn't remove your ChatGPT session from the bridge",
 		stateRestoreFailed:           "Couldn't restore the previous ChatGPT login, sign in with the original account",
 		stateDotUnavailable:          "Your linked Dot is no longer in ChatGPT, sign in again to connect your current Dot",
+		stateDotMissing:              "ChatGPT can't find your Dot right now, retrying",
 	})
 }
 
@@ -128,6 +130,8 @@ func relinkStatus(err error, certain bool) error {
 }
 
 var errDotUnavailable = errors.New("the linked Dot is no longer the account's Dot in ChatGPT")
+
+var errDotMissing = errors.New("ChatGPT doesn't list a primary Dot for this account")
 
 var errNoBaseline = errors.New("no baseline message ID in the Dot room; send a message in ChatGPT before linking")
 
