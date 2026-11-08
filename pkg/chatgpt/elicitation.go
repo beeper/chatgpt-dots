@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
@@ -94,12 +95,11 @@ func (e *Elicitation) ToolApproval() ([]string, bool) {
 	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" {
 		return nil, false
 	}
-	var meta struct {
-		Kind          string          `json:"codex_approval_kind"`
-		RequiresInput bool            `json:"codex_requires_user_input"`
-		Persist       json.RawMessage `json:"persist"`
+	var meta map[string]json.RawMessage
+	if json.Unmarshal(e.Params.Meta, &meta) != nil || string(meta["codex_approval_kind"]) != `"mcp_tool_call"` {
+		return nil, false
 	}
-	if json.Unmarshal(e.Params.Meta, &meta) != nil || meta.Kind != "mcp_tool_call" || meta.RequiresInput {
+	if input, ok := meta["codex_requires_user_input"]; ok && string(input) != "false" {
 		return nil, false
 	}
 	var schema struct {
@@ -111,11 +111,11 @@ func (e *Elicitation) ToolApproval() ([]string, bool) {
 		return nil, false
 	}
 	var persist []string
-	if len(meta.Persist) != 0 && string(meta.Persist) != "null" {
+	if raw := meta["persist"]; len(raw) != 0 && string(raw) != "null" {
 		var one string
-		if json.Unmarshal(meta.Persist, &one) == nil {
+		if json.Unmarshal(raw, &one) == nil {
 			persist = []string{one}
-		} else if json.Unmarshal(meta.Persist, &persist) != nil {
+		} else if json.Unmarshal(raw, &persist) != nil {
 			return nil, false
 		}
 	}
@@ -135,6 +135,11 @@ func (e *Elicitation) Summary() string {
 	var meta struct {
 		Reason       string          `json:"reason"`
 		Confirmation json.RawMessage `json:"openai/confirmation"`
+		Params       json.RawMessage `json:"tool_params"`
+		Display      []struct {
+			Name  string          `json:"display_name"`
+			Value json.RawMessage `json:"value"`
+		} `json:"tool_params_display"`
 	}
 	var confirmation struct {
 		Presentation struct {
@@ -153,6 +158,28 @@ func (e *Elicitation) Summary() string {
 		for _, field := range confirmation.Presentation.Fields {
 			if strings.TrimSpace(field.Value) != "" && !strings.Contains(text, field.Value) {
 				text += "\n\n" + field.Label + " " + field.Value
+			}
+		}
+		if _, ok := e.ToolApproval(); ok {
+			if len(meta.Display) == 0 {
+				var params map[string]json.RawMessage
+				_ = json.Unmarshal(meta.Params, &params)
+				for _, name := range slices.Sorted(maps.Keys(params)) {
+					meta.Display = append(meta.Display, struct {
+						Name  string          `json:"display_name"`
+						Value json.RawMessage `json:"value"`
+					}{name, params[name]})
+				}
+			}
+			for _, param := range meta.Display {
+				value := string(param.Value)
+				_ = json.Unmarshal(param.Value, &value)
+				if runes := []rune(value); len(runes) > 500 {
+					value = string(runes[:500]) + "…"
+				}
+				if strings.TrimSpace(value) != "" && !strings.Contains(text, value) {
+					text += "\n\n" + param.Name + ": " + value
+				}
 			}
 		}
 	}
