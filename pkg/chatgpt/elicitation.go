@@ -177,7 +177,7 @@ func (e *Elicitation) Summary() string {
 				if runes := []rune(value); len(runes) > 500 {
 					value = string(runes[:500]) + "…"
 				}
-				if strings.TrimSpace(value) != "" && !strings.Contains(text, value) {
+				if strings.TrimSpace(value) != "" {
 					text += "\n\n" + param.Name + ": " + value
 				}
 			}
