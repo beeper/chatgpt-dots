@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -42,6 +43,9 @@ func (e *Elicitation) Binary() bool {
 func (e *Elicitation) AcceptContent() (map[string]any, bool) {
 	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" {
 		return nil, false
+	}
+	if _, ok := e.ToolApproval(); ok {
+		return map[string]any{}, true
 	}
 	if e.Params.Server == "browser" || e.Params.Server == "browser-use" {
 		return nil, false
@@ -83,6 +87,44 @@ func (e *Elicitation) AcceptContent() (map[string]any, bool) {
 		}
 	}
 	return map[string]any{confirmation.Field: true}, true
+}
+
+// ToolApproval reports whether this is a Codex tool-call approval and which remembered approvals it offers.
+func (e *Elicitation) ToolApproval() ([]string, bool) {
+	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" {
+		return nil, false
+	}
+	var meta struct {
+		Kind          string          `json:"codex_approval_kind"`
+		RequiresInput bool            `json:"codex_requires_user_input"`
+		Persist       json.RawMessage `json:"persist"`
+	}
+	if json.Unmarshal(e.Params.Meta, &meta) != nil || meta.Kind != "mcp_tool_call" || meta.RequiresInput {
+		return nil, false
+	}
+	var schema struct {
+		Type       string                     `json:"type"`
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if json.Unmarshal(e.Params.Schema, &schema) != nil || schema.Type != "object" || schema.Properties == nil || len(schema.Properties) != 0 || len(schema.Required) != 0 {
+		return nil, false
+	}
+	var persist []string
+	if len(meta.Persist) != 0 && string(meta.Persist) != "null" {
+		var one string
+		if json.Unmarshal(meta.Persist, &one) == nil {
+			persist = []string{one}
+		} else if json.Unmarshal(meta.Persist, &persist) != nil {
+			return nil, false
+		}
+	}
+	for _, option := range persist {
+		if option != "session" && option != "always" {
+			return nil, false
+		}
+	}
+	return persist, true
 }
 
 func (e *Elicitation) Summary() string {
@@ -169,7 +211,7 @@ func (c *Client) ReadElicitation(ctx context.Context, room, message string) (*El
 	return &state, nil
 }
 
-func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerprint, action string, elicitation *Elicitation) (bool, error) {
+func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerprint, action, persist string, elicitation *Elicitation) (bool, error) {
 	path, err := c.elicitationPath(room, message)
 	if err != nil {
 		return false, err
@@ -192,6 +234,13 @@ func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerpr
 		if !ok {
 			return false, errors.New("confirmation needs the ChatGPT interface")
 		}
+	}
+	if persist != "" {
+		offered, _ := elicitation.ToolApproval()
+		if action != "accept" || !slices.Contains(offered, persist) {
+			return false, errors.New("ChatGPT did not offer this approval option")
+		}
+		body.Result.Meta = map[string]any{"persist": persist}
 	}
 	var response struct {
 		Status string `json:"status"`
