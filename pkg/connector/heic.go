@@ -3,6 +3,7 @@ package connector
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -71,6 +72,28 @@ func convertHEICToJPEG(ctx context.Context, imageData []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+func looksLikeHEIF(data []byte) bool {
+	return len(data) >= 12 && string(data[4:8]) == "ftyp"
+}
+
+func primaryImageIndex(ctx context.Context, inputPath string) (int, error) {
+	output, err := exec.CommandContext(ctx, "heif-info", inputPath).Output()
+	if err != nil {
+		return 0, fmt.Errorf("heif-info failed: %w", err)
+	}
+	index := 0
+	for _, line := range strings.Split(string(output), "\n") {
+		if !strings.HasPrefix(line, "image: ") {
+			continue
+		}
+		index++
+		if strings.HasSuffix(strings.TrimSpace(line), ", primary") {
+			return index, nil
+		}
+	}
+	return 0, errors.New("heif-info listed no primary image")
+}
+
 func runHEIFDec(ctx context.Context, dir, inputPath, extension string) ([]byte, error) {
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "heif-dec", "--quiet", inputPath, filepath.Join(dir, "output."+extension))
@@ -82,13 +105,17 @@ func runHEIFDec(ctx context.Context, dir, inputPath, extension string) ([]byte, 
 		return nil, fmt.Errorf("heif-dec failed: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
-	// heif-dec writes output-1.jpg, output-2.jpg, ... instead of output.jpg
-	// when the file holds several top-level images. Use the first one.
-	outputs, err := filepath.Glob(filepath.Join(dir, "output*."+extension))
-	if err != nil || len(outputs) == 0 {
-		return nil, fmt.Errorf("heif-dec produced no output: %s", strings.TrimSpace(stderr.String()))
+	outputPath := filepath.Join(dir, "output."+extension)
+	if _, err := os.Stat(outputPath); err != nil {
+		// heif-dec writes output-1.jpg, output-2.jpg, ... in top-level image
+		// order when the file holds several images, so pick the primary one.
+		index, err := primaryImageIndex(ctx, inputPath)
+		if err != nil {
+			return nil, err
+		}
+		outputPath = filepath.Join(dir, fmt.Sprintf("output-%d.%s", index, extension))
 	}
-	data, err := os.ReadFile(outputs[0])
+	data, err := os.ReadFile(outputPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read converted image: %w", err)
 	}

@@ -1061,10 +1061,13 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 				mimeType = msg.Content.Info.MimeType
 			}
 			fileName := msg.Content.GetFileName()
-			if isHEICImage(mimeType, fileName) {
+			if isHEICImage(mimeType, fileName) && looksLikeHEIF(data) {
 				data, err = convertHEICToJPEG(ctx, data)
 				if err != nil {
 					return nil, fmt.Errorf("%w: %w", bridgev2.ErrMediaConvertFailed, err)
+				}
+				if len(data) > chatgpt.MaxUploadSize {
+					return nil, errMediaTooLarge
 				}
 				mimeType = "image/jpeg"
 				fileName = jpegFileName(fileName)
