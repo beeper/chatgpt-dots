@@ -1060,7 +1060,19 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 			if msg.Content.Info != nil {
 				mimeType = msg.Content.Info.MimeType
 			}
-			pending.FileID, err = api.Upload(ctx, state.Profile.Room, msg.Content.GetFileName(), mimeType, data)
+			fileName := msg.Content.GetFileName()
+			if isHEICImage(mimeType, fileName) && looksLikeHEIF(data) {
+				data, err = convertHEICToJPEG(ctx, data)
+				if err != nil {
+					return nil, fmt.Errorf("%w: %w", bridgev2.ErrMediaConvertFailed, err)
+				}
+				if len(data) > chatgpt.MaxUploadSize {
+					return nil, errMediaTooLarge
+				}
+				mimeType = "image/jpeg"
+				fileName = jpegFileName(fileName)
+			}
+			pending.FileID, err = api.Upload(ctx, state.Profile.Room, fileName, mimeType, data)
 			if err != nil {
 				return nil, wrapSendError(fmt.Errorf("attachment upload failed; no message sent (an uncertain upload may leave an unused file): %w", err), true)
 			}
