@@ -17,7 +17,7 @@ RUN sh ./build.sh && ./chatgpt-dots --version
 
 FROM ${RUNTIME_IMAGE} AS runtime
 ENV UID=1337 GID=1337
-RUN apk add --no-cache su-exec ca-certificates
+RUN apk add --no-cache su-exec ca-certificates libheif-tools
 COPY --from=builder --chmod=0755 /build/chatgpt-dots /usr/bin/chatgpt-dots
 COPY --chmod=0755 docker-run.sh /docker-run.sh
 COPY LICENSE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.txt /usr/share/licenses/chatgpt-dots/

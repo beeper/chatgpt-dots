@@ -476,8 +476,8 @@ func (c *Client) GetUserInfo(_ context.Context, g *bridgev2.Ghost) (*bridgev2.Us
 	return nil, errors.New("unknown Dot contact")
 }
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
-	return &event.RoomFeatures{ID: "chatgpt-dots.replies-reactions.v2", ReadReceipts: true, TypingNotifications: true, ReactionCount: 1, File: event.FileFeatureMap{
-		"m.image":         {MimeTypes: map[string]event.CapabilitySupportLevel{"image/jpeg": event.CapLevelFullySupported, "image/jpg": event.CapLevelFullySupported, "image/png": event.CapLevelFullySupported, "image/gif": event.CapLevelFullySupported, "image/webp": event.CapLevelFullySupported, "image/bmp": event.CapLevelFullySupported, "image/tiff": event.CapLevelFullySupported, "image/avif": event.CapLevelFullySupported, "image/svg+xml": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
+	return &event.RoomFeatures{ID: "chatgpt-dots.replies-reactions.v1", ReadReceipts: true, TypingNotifications: true, ReactionCount: 1, File: event.FileFeatureMap{
+		"m.image":         {MimeTypes: map[string]event.CapabilitySupportLevel{"image/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.file":          {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.audio":         {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
 		"m.video":         {MimeTypes: map[string]event.CapabilitySupportLevel{"video/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
@@ -1060,7 +1060,16 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 			if msg.Content.Info != nil {
 				mimeType = msg.Content.Info.MimeType
 			}
-			pending.FileID, err = api.Upload(ctx, state.Profile.Room, msg.Content.GetFileName(), mimeType, data)
+			fileName := msg.Content.GetFileName()
+			if isHEICImage(mimeType, fileName) {
+				data, err = convertHEICToJPEG(ctx, data)
+				if err != nil {
+					return nil, fmt.Errorf("%w: %w", bridgev2.ErrMediaConvertFailed, err)
+				}
+				mimeType = "image/jpeg"
+				fileName = jpegFileName(fileName)
+			}
+			pending.FileID, err = api.Upload(ctx, state.Profile.Room, fileName, mimeType, data)
 			if err != nil {
 				return nil, wrapSendError(fmt.Errorf("attachment upload failed; no message sent (an uncertain upload may leave an unused file): %w", err), true)
 			}
