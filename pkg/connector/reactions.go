@@ -46,7 +46,7 @@ func (c *Client) reactionClient(ctx context.Context, portal *bridgev2.Portal, ro
 	verified, err := api.Verify(ctx, state.Profile)
 	if err == nil {
 		var current *RoomState
-		current, err = roomState(api, state.Profile, verified)
+		current, err = roomMembers(api, state.Profile, verified)
 		if err == nil && (current.DotMember != state.DotMember || current.HumanMember != state.HumanMember) {
 			err = errors.New("Dot room members changed; refusing reaction")
 		}

@@ -246,6 +246,9 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 		if err != nil {
 			return nil, err
 		}
+		if err = api.LoadLatest(ctx, room); err != nil {
+			return nil, err
+		}
 		state, err := roomState(api, p, room)
 		if err != nil {
 			return nil, err
@@ -283,20 +286,9 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 	return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "chatgpt-dots.complete", Instructions: "Connected the existing primary Dot. Only messages after linking are bridged.", CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: login.ID, UserLogin: login}}, nil
 }
 func roomState(api *chatgpt.Client, p chatgpt.Profile, r *chatgpt.Room) (*RoomState, error) {
-	state := &RoomState{Profile: p, Linked: time.Now()}
-	for _, m := range r.Members {
-		if m.Aeon == p.ID {
-			state.DotMember = m.ID
-		} else if m.Aeon == "" {
-			if state.HumanMember != "" {
-				return nil, errors.New("Dot room has multiple human members")
-			}
-			state.HumanMember = m.ID
-			state.HumanName = m.Name
-		}
-	}
-	if state.DotMember == "" || state.HumanMember == "" || len(r.Members) != 2 {
-		return nil, errors.New("expected a verified one-to-one Dot room")
+	state, err := roomMembers(api, p, r)
+	if err != nil {
+		return nil, err
 	}
 	var latest time.Time
 	for _, m := range r.Latest {
@@ -313,6 +305,24 @@ func roomState(api *chatgpt.Client, p chatgpt.Profile, r *chatgpt.Room) (*RoomSt
 	}
 	if latest.IsZero() {
 		return nil, errors.New("baseline message lacks a timestamp; cannot establish safe history boundary")
+	}
+	return state, nil
+}
+func roomMembers(api *chatgpt.Client, p chatgpt.Profile, r *chatgpt.Room) (*RoomState, error) {
+	state := &RoomState{Profile: p, Linked: time.Now()}
+	for _, m := range r.Members {
+		if m.Aeon == p.ID {
+			state.DotMember = m.ID
+		} else if m.Aeon == "" {
+			if state.HumanMember != "" {
+				return nil, errors.New("Dot room has multiple human members")
+			}
+			state.HumanMember = m.ID
+			state.HumanName = m.Name
+		}
+	}
+	if state.DotMember == "" || state.HumanMember == "" || len(r.Members) != 2 {
+		return nil, errors.New("expected a verified one-to-one Dot room")
 	}
 	if !api.Identity.IsSelf(state.HumanMember) {
 		return nil, errors.New("room human member does not match token user; workspace account-user mapping is not verified")

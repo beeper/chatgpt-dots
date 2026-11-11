@@ -109,7 +109,7 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	if err != nil {
 		return "", false, err
 	}
-	current, err := roomState(api, room.Profile, verified)
+	current, err := roomMembers(api, room.Profile, verified)
 	if err != nil || current.DotMember != room.DotMember || current.HumanMember != room.HumanMember {
 		return "", false, errors.New("The Dot room identity changed; refusing confirmation")
 	}
