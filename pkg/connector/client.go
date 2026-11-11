@@ -119,6 +119,9 @@ func (c *Client) sendState(state status.BridgeState) {
 	c.login.BridgeState.Send(state)
 }
 func (c *Client) state(err error) bool {
+	return c.stateVia(err, c.proxy.Load().host())
+}
+func (c *Client) stateVia(err error, proxyHost string) bool {
 	state := status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: stateSyncFailed, Info: map[string]any{"go_error": err.Error()}}
 	var httpErr *chatgpt.HTTPError
 	var schemaErr *chatgpt.SchemaError
@@ -132,7 +135,7 @@ func (c *Client) state(err error) bool {
 			Str("path", httpErr.Path).
 			Bool("cloudflare_challenge", httpErr.Challenge).
 			Str("detail", httpErr.Body).
-			Str("proxy_host", c.proxy.Load().host()).
+			Str("proxy_host", proxyHost).
 			Msg("ChatGPT request failed")
 		switch {
 		case httpErr.Status == http.StatusUnauthorized:
@@ -158,7 +161,7 @@ func (c *Client) state(err error) bool {
 			Str("decode_error", schemaErr.Cause).
 			Str("decode_field", schemaErr.Field).
 			Int64("decode_offset", schemaErr.Offset).
-			Str("proxy_host", c.proxy.Load().host()).
+			Str("proxy_host", proxyHost).
 			Msg("ChatGPT request failed")
 	} else if isTransportError(err) {
 		state.Error = stateNetworkError
@@ -277,6 +280,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 		if ctx.Err() != nil {
 			return false
 		}
+		proxyHost := proxy.host()
 		if proxy.failed.Load() {
 			if proxyErr := proxy.update(ctx, "connect"); proxyErr != nil {
 				c.login.Log.Warn().Err(proxyErr).Msg("Could not refresh ChatGPT proxy")
@@ -287,7 +291,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 			if ctx.Err() != nil {
 				return false
 			}
-			if c.state(err) {
+			if c.stateVia(err, proxyHost) {
 				return false
 			}
 			delay = min(delay*2, time.Minute)
