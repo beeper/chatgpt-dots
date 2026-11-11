@@ -25,6 +25,7 @@ type Signal struct {
 	Type    string `json:"type"`
 	Payload struct {
 		Room      string  `json:"room_id"`
+		MessageID string  `json:"message_id"`
 		Typing    *bool   `json:"typing"`
 		Timestamp float64 `json:"timestamp"`
 		Source    struct {
@@ -32,6 +33,7 @@ type Signal struct {
 			Member string `json:"account_user_id"`
 		} `json:"source"`
 		Message struct {
+			ID     string `json:"id"`
 			Member string `json:"account_user_id"`
 		} `json:"message"`
 	} `json:"payload"`
