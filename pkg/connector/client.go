@@ -476,7 +476,19 @@ func (c *Client) GetUserInfo(_ context.Context, g *bridgev2.Ghost) (*bridgev2.Us
 	return nil, errors.New("unknown Dot contact")
 }
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
-	return &event.RoomFeatures{ID: "chatgpt-dots.replies-reactions.v1", ReadReceipts: true, TypingNotifications: true, ReactionCount: 1, File: event.FileFeatureMap{
+	return &event.RoomFeatures{ID: "chatgpt-dots.formatting.v1", ReadReceipts: true, TypingNotifications: true, ReactionCount: 1, Formatting: event.FormattingFeatureMap{
+		event.FmtBold:          event.CapLevelFullySupported,
+		event.FmtItalic:        event.CapLevelFullySupported,
+		event.FmtStrikethrough: event.CapLevelFullySupported,
+		event.FmtInlineCode:    event.CapLevelFullySupported,
+		event.FmtCodeBlock:     event.CapLevelFullySupported,
+		event.FmtBlockquote:    event.CapLevelFullySupported,
+		event.FmtInlineLink:    event.CapLevelFullySupported,
+		event.FmtUnorderedList: event.CapLevelFullySupported,
+		event.FmtOrderedList:   event.CapLevelFullySupported,
+		event.FmtListStart:     event.CapLevelFullySupported,
+		event.FmtHeaders:       event.CapLevelPartialSupport,
+	}, File: event.FileFeatureMap{
 		"m.image":         {MimeTypes: map[string]event.CapabilitySupportLevel{"image/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.file":          {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.audio":         {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
@@ -1001,9 +1013,8 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 		return nil, relinkStatus(errors.New("dot room members changed; refusing send"), certain)
 	}
 	fingerprint := []byte(msg.Content.Body)
-	text := msg.Content.Body
+	text := matrixText(ctx, msg.Content, media)
 	if media {
-		text = msg.Content.GetCaption()
 		fingerprint, err = json.Marshal(msg.Content)
 		if err != nil {
 			return nil, errors.New("cannot fingerprint attachment content")
