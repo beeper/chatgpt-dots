@@ -53,6 +53,7 @@ type Client struct {
 	receipts       map[string]*receiptState
 	delivered      map[string][32]byte
 	deliveredOrder []string
+	unrecognized   map[string]bool
 }
 
 func (c *Client) Connect(ctx context.Context) {
@@ -787,6 +788,7 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	if incomingStale(m, existing) {
 		return nil
 	}
+	c.warnUnrecognized(m, existing)
 	c.prepareThreads(state, &m, existing)
 	var cleanup func() error
 	done := make(chan struct{}, 1)
