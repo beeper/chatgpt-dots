@@ -51,6 +51,7 @@ type Client struct {
 	signalsLive    atomic.Bool
 	rescan         atomic.Bool
 	receipts       map[string]*receiptState
+	typing         map[string]context.CancelFunc
 	delivered      map[string][32]byte
 	deliveredOrder []string
 }

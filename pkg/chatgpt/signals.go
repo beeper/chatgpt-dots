@@ -54,6 +54,16 @@ func (c *Client) RoomSignals(ctx context.Context, p Profile) (*Room, error) {
 	return &room, nil
 }
 
+func (c *Client) SendTyping(ctx context.Context, room string) error {
+	c.mu.RLock()
+	verified := c.rooms[room]
+	c.mu.RUnlock()
+	if !verified {
+		return errors.New("refusing unverified Dot room")
+	}
+	return c.do(ctx, http.MethodPost, "/messaging/rooms/"+url.PathEscape(room)+"/responding_heartbeat", nil, nil)
+}
+
 type StreamDisconnectedError struct {
 	CloseStatus websocket.StatusCode
 	PingFailed  bool

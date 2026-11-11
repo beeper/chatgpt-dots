@@ -7,6 +7,7 @@ import (
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
 	"github.com/coder/websocket"
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -18,6 +19,11 @@ type receiptState struct {
 	SentReadAt time.Time
 	SentTime   time.Time
 }
+
+const (
+	typingHeartbeatInterval = 2 * time.Second
+	typingHeartbeatLimit    = 30 * time.Second
+)
 
 type nativeTyping struct {
 	simplevent.Typing
@@ -130,6 +136,65 @@ func (c *Client) sendTyping(ctx context.Context, state *RoomState, timeout time.
 	evt.MutateContextFunc = func(context.Context) context.Context { return ctx }
 	c.login.QueueRemoteEvent(evt)
 }
+
+func (c *Client) HandleMatrixTyping(ctx context.Context, msg *bridgev2.MatrixTyping) error {
+	c.mu.Lock()
+	room := string(msg.Portal.ID)
+	if stop := c.typing[room]; stop != nil {
+		stop()
+		delete(c.typing, room)
+	}
+	api, generation := c.api, c.runContext
+	state := c.meta.Rooms[room]
+	if !msg.IsTyping {
+		c.mu.Unlock()
+		return nil
+	}
+	if state == nil || msg.Portal.Receiver != c.login.ID {
+		c.mu.Unlock()
+		return errors.New("refusing typing in an unverified Dot room")
+	}
+	if api == nil || generation == nil || generation.Err() != nil || !c.IsLoggedIn() {
+		c.mu.Unlock()
+		return errors.New("not connected to ChatGPT")
+	}
+	typingCtx, stop := context.WithTimeout(generation, typingHeartbeatLimit)
+	if c.typing == nil {
+		c.typing = make(map[string]context.CancelFunc)
+	}
+	c.typing[room] = stop
+	c.mu.Unlock()
+	heartbeat := func() error {
+		ctx, cancel := context.WithTimeout(typingCtx, 5*time.Second)
+		defer cancel()
+		return api.SendTyping(ctx, state.Profile.Room)
+	}
+	if err := heartbeat(); err != nil {
+		stop()
+		return err
+	}
+	go func() {
+		ticker := time.NewTicker(typingHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-typingCtx.Done():
+				return
+			case <-ticker.C:
+			}
+			if err := heartbeat(); err != nil {
+				if typingCtx.Err() == nil {
+					zerolog.Ctx(ctx).Debug().Err(err).Msg("Stopped ChatGPT typing heartbeats")
+				}
+				stop()
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+var _ bridgev2.TypingHandlingNetworkAPI = (*Client)(nil)
 
 func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *RoomState) (*receiptState, error) {
 	room, err := api.RoomSignals(ctx, state.Profile)
