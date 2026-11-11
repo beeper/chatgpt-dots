@@ -353,6 +353,10 @@ func (e mediaRetryError) Error() string {
 
 func (e mediaRetryError) Unwrap() error { return e.error }
 
+type messageError struct{ error }
+
+func (e messageError) Unwrap() error { return e.error }
+
 func onlyMediaRetries(err error) bool {
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		for _, member := range joined.Unwrap() {

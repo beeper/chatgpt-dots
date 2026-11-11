@@ -788,7 +788,7 @@ func (c *Client) deliverMedia(ctx context.Context, state *RoomState, m chatgpt.M
 }
 func (c *Client) giveUp(ctx context.Context, m chatgpt.Message, err error) bool {
 	var httpErr *chatgpt.HTTPError
-	if ctx.Err() != nil || isTransportError(err) || errors.As(err, &httpErr) && !isMessageRejection(httpErr) {
+	if !errors.As(err, &messageError{}) || ctx.Err() != nil || isTransportError(err) || errors.As(err, &httpErr) && !isMessageRejection(httpErr) {
 		return false
 	}
 	c.failures[m.ID]++
@@ -809,7 +809,7 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	} else if m.Sender == state.HumanMember {
 		sender = bridgev2.EventSender{Sender: c.GetUserID(), SenderLogin: c.login.ID, IsFromMe: true}
 	} else {
-		return errors.New("message from an unverified Dot room member")
+		return messageError{errors.New("message from an unverified Dot room member")}
 	}
 	existing, err := c.connector.bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(m.ID))
 	if err != nil {
@@ -939,8 +939,10 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		var storage *chatgpt.AttachmentStorageError
 		if errors.As(conversionErr, &storage) {
 			return mediaRetryError{storage}
+		} else if conversionErr != nil {
+			return messageError{conversionErr}
 		}
-		return conversionErr
+		return nil
 	}
 	result := c.login.QueueRemoteEvent(msg)
 	if !result.Success || result.Ignored {
