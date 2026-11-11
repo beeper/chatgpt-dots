@@ -124,3 +124,36 @@ func (c *Client) DownloadAttachment(ctx context.Context, room, fileID string) (*
 	}
 	return file, nil
 }
+
+func (c *Client) LinkThumbnail(ctx context.Context, thumbnailURL string) (*FileData, error) {
+	u, err := url.Parse(thumbnailURL)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || !(u.Hostname() == "images.openai.com" || strings.HasSuffix(u.Hostname(), ".oaiusercontent.com")) {
+		return nil, errors.New("link preview image uses an unsupported origin")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, errors.New("invalid link preview image request")
+	}
+	req.Header.Set("User-Agent", "BeeperDotsBridge/0.1")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, errors.New("link preview image download failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("link preview image download returned HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
+	if err != nil || len(data) > 4<<20 {
+		return nil, errors.New("link preview image exceeds the supported download size")
+	}
+	mimeType, _, _ := mime.ParseMediaType(mimetype.Detect(data).String())
+	if !strings.HasPrefix(mimeType, "image/") {
+		return nil, errors.New("link preview image is not an image")
+	}
+	file := &FileData{MIME: mimeType, Data: data}
+	if config, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil && config.Width > 0 && config.Height > 0 {
+		file.Width, file.Height = config.Width, config.Height
+	}
+	return file, nil
+}
