@@ -822,7 +822,7 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 			return
 		}
 		original := &bridgev2.MatrixMessage{MatrixEventBase: bridgev2.MatrixEventBase[*event.MessageEventContent]{Portal: p, Event: &event.Event{ID: pending.EventID, RoomID: p.MXID, Sender: pending.Sender, Timestamp: pending.Timestamp, Type: event.EventMessage}}}
-		original.AddPendingToSave(&database.Message{SenderID: c.GetUserID(), Metadata: &MessageMetadata{Revision: revision(m), OutgoingMedia: pending.Media}}, networkid.TransactionID(m.RequestID), nil)
+		original.AddPendingToSave(&database.Message{SenderID: c.GetUserID(), Metadata: &MessageMetadata{Revision: textRevision(m, revision(m)), OutgoingMedia: pending.Media}}, networkid.TransactionID(m.RequestID), nil)
 	}
 	var conversionErr error
 	msg.ConvertMessageFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, _ chatgpt.Message) (*bridgev2.ConvertedMessage, error) {
@@ -1137,7 +1137,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 }
 
 func (c *Client) sendResponse(m chatgpt.Message, media bool, generation context.Context) *bridgev2.MatrixMessageResponse {
-	return &bridgev2.MatrixMessageResponse{DB: &database.Message{ID: networkid.MessageID(m.ID), SenderID: c.GetUserID(), ThreadRoot: networkid.MessageID(m.ReplyRootMessageID), Timestamp: m.Created, Metadata: &MessageMetadata{Revision: revision(m), OutgoingMedia: media}}, PostSave: func(ctx context.Context, _ *database.Message) {
+	return &bridgev2.MatrixMessageResponse{DB: &database.Message{ID: networkid.MessageID(m.ID), SenderID: c.GetUserID(), ThreadRoot: networkid.MessageID(m.ReplyRootMessageID), Timestamp: m.Created, Metadata: &MessageMetadata{Revision: textRevision(m, revision(m)), OutgoingMedia: media}}, PostSave: func(ctx context.Context, _ *database.Message) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		// The framework calls PostSave after this client's handler has returned.
