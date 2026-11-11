@@ -338,28 +338,32 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) 
 			}
 		}
 		c.mu.Unlock()
-		ghost, err := c.connector.bridge.GetGhostByID(ctx, c.GetUserID())
-		if err != nil {
-			return err
+		for _, userID := range []networkid.UserID{c.GetUserID(), c.dotID(state)} {
+			ghost, err := c.connector.bridge.GetGhostByID(ctx, userID)
+			if err != nil {
+				return err
+			}
+			info, err := c.GetUserInfo(ctx, ghost)
+			if err != nil {
+				return err
+			}
+			ghost.UpdateInfo(ctx, info)
 		}
-		selfInfo, err := c.GetUserInfo(ctx, ghost)
-		if err != nil {
-			return err
-		}
-		ghost.UpdateInfo(ctx, selfInfo)
 		portal, err := c.connector.bridge.GetPortalByKey(ctx, c.key(state))
 		if err != nil {
 			return err
 		}
+		info := c.chatInfo(state)
 		if portal.MXID == "" {
-			if err = portal.CreateMatrixRoom(ctx, c.login, c.chatInfo(state)); err != nil {
+			if err = portal.CreateMatrixRoom(ctx, c.login, info); err != nil {
 				return err
 			}
 			clear(c.delivered)
 			c.deliveredOrder = nil
 			c.rescan.Store(true)
 		} else {
-			portal.UpdateInfo(ctx, c.chatInfo(state), c.login, nil, time.Time{})
+			info.Members = nil
+			portal.UpdateInfo(ctx, info, c.login, nil, time.Time{})
 		}
 	}
 	return nil
@@ -474,6 +478,12 @@ func (c *Client) GetUserInfo(_ context.Context, g *bridgev2.Ghost) (*bridgev2.Us
 		}
 	}
 	return nil, errors.New("unknown Dot contact")
+}
+func (c *Client) HandleMatrixMembership(_ context.Context, msg *bridgev2.MatrixMembershipChange) (*bridgev2.MatrixMembershipResult, error) {
+	if msg.Type == bridgev2.Invite {
+		return nil, errors.New("cannot invite additional users to a Dot chat")
+	}
+	return nil, nil
 }
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
 	return &event.RoomFeatures{ID: "chatgpt-dots.replies-reactions.v1", ReadReceipts: true, TypingNotifications: true, ReactionCount: 1, File: event.FileFeatureMap{
@@ -1175,3 +1185,4 @@ func (c *Client) findRequest(ctx context.Context, api *chatgpt.Client, state *Ro
 }
 
 var _ bridgev2.NetworkAPI = (*Client)(nil)
+var _ bridgev2.MembershipHandlingNetworkAPI = (*Client)(nil)
