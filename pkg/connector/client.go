@@ -31,6 +31,7 @@ const (
 	livePollInterval      = 30 * time.Second
 	avatarRefreshInterval = 30 * time.Minute
 	dotRecheckInterval    = 5 * time.Minute
+	maxMessageAttempts    = 3
 )
 
 type Client struct {
@@ -53,6 +54,8 @@ type Client struct {
 	receipts       map[string]*receiptState
 	delivered      map[string][32]byte
 	deliveredOrder []string
+	failures       map[string]int
+	rescanAfter    map[string]string
 }
 
 func (c *Client) Connect(ctx context.Context) {
@@ -156,6 +159,8 @@ func (c *Client) run(ctx context.Context) {
 	c.receipts = make(map[string]*receiptState)
 	c.delivered = make(map[string][32]byte)
 	c.deliveredOrder = nil
+	c.failures = make(map[string]int)
+	c.rescanAfter = make(map[string]string)
 	for _, watch := range c.threadMessages {
 		watch.NextRefresh = time.Time{}
 	}
@@ -537,7 +542,11 @@ func (c *Client) advanceCursor(ctx context.Context, state *RoomState, id string)
 	return nil
 }
 func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
-	full := c.rescan.Swap(false) || c.meta.Rescan || !c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion
+	full := c.rescan.Swap(false)
+	if full {
+		clear(c.rescanAfter)
+	}
+	full = full || c.meta.Rescan || !c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion
 	if full {
 		if !c.meta.Rescan {
 			c.mu.Lock()
@@ -552,11 +561,6 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 				return err
 			}
 		}
-		defer func() {
-			if err != nil && !onlyMediaRetries(err) {
-				c.rescan.Store(true)
-			}
-		}()
 	}
 	var pending error
 	for _, state := range c.meta.Rooms {
@@ -608,6 +612,9 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 		}
 		if full {
 			after = state.Baseline
+			if resume := c.rescanAfter[state.Profile.Room]; resume != "" {
+				after = resume
+			}
 		}
 		c.mu.RLock()
 		var pendingIDs []string
@@ -644,7 +651,8 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			sort.SliceStable(page.Items, func(i, j int) bool { return page.Items[i].Created.Before(page.Items[j].Created) })
 			for _, m := range page.Items {
 				if m.ID == "" || m.Created.IsZero() {
-					return errors.New("provider message missing stable identity or timestamp")
+					c.login.Log.Error().Str("message_id", m.ID).Msg("Skipping ChatGPT message without a stable identity or timestamp")
+					continue
 				}
 				if m.ID == state.Baseline || m.Created.Before(state.Linked) {
 					continue
@@ -690,6 +698,9 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			if next == after {
 				return errors.New("provider pagination did not advance")
 			}
+			if full {
+				c.rescanAfter[state.Profile.Room] = next
+			}
 			after = next
 		}
 		if err := c.sendReceipt(ctx, state, receipt); err != nil {
@@ -711,6 +722,7 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 		if err != nil {
 			return err
 		}
+		clear(c.rescanAfter)
 	}
 	return pending
 }
@@ -761,12 +773,31 @@ func (c *Client) deliverMedia(ctx context.Context, state *RoomState, m chatgpt.M
 	if err == nil {
 		err = c.syncReactions(ctx, state, m)
 	}
+	if err != nil && !onlyMediaRetries(err) && c.giveUp(ctx, m, err) {
+		err = nil
+	}
+	if err == nil {
+		delete(c.failures, m.ID)
+	}
 	if err == nil || onlyMediaRetries(err) {
 		if saveErr := c.saveMediaRetry(ctx, state, m.ID, after, rev, err != nil); saveErr != nil {
 			return saveErr
 		}
 	}
 	return err
+}
+func (c *Client) giveUp(ctx context.Context, m chatgpt.Message, err error) bool {
+	var httpErr *chatgpt.HTTPError
+	if ctx.Err() != nil || isTransportError(err) || errors.As(err, &httpErr) && !isMessageRejection(httpErr) {
+		return false
+	}
+	c.failures[m.ID]++
+	if c.failures[m.ID] < maxMessageAttempts {
+		return false
+	}
+	c.login.Log.Err(err).Str("message_id", m.ID).Int("attempts", c.failures[m.ID]).Msg("Skipping ChatGPT message that keeps failing to bridge")
+	delete(c.failures, m.ID)
+	return true
 }
 func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Message) error {
 	if m.ID == state.Baseline || m.Created.Before(state.Linked) {
@@ -816,6 +847,9 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	msg.ConvertMessageFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, _ chatgpt.Message) (*bridgev2.ConvertedMessage, error) {
 		converted, err := c.convertIncoming(ctx, state, p, intent, m, nil)
 		conversionErr = err
+		if err != nil && c.failures[m.ID]+1 < maxMessageAttempts {
+			return nil, fmt.Errorf("%w: %w", bridgev2.ErrIgnoringRemoteEvent, err)
+		}
 		if err == nil {
 			for _, part := range converted.Parts {
 				cutOffLongText(c.login.Log, part.Content, maxMatrixContentBytes)
@@ -826,7 +860,9 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	msg.ConvertEditFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
 		converted, err := c.convertIncoming(ctx, state, p, intent, m, existing)
 		conversionErr = err
-		if err != nil {
+		if err != nil && c.failures[m.ID]+1 < maxMessageAttempts {
+			return nil, fmt.Errorf("%w: %w", bridgev2.ErrIgnoringRemoteEvent, err)
+		} else if err != nil {
 			return nil, err
 		}
 		addedParts := *converted
