@@ -45,6 +45,8 @@ go vet -mod=readonly -tags goolm ./...
 ```
 
 The build uses Go cryptography and CGO SQLite; no system libolm is required.
+Sending HEIC or AVIF photos needs libheif's `heif-dec` and `heif-info` at
+runtime (`libheif-examples` on Debian/Ubuntu, `libheif-tools` on Alpine, `libheif` on Homebrew).
 A [Dockerfile](Dockerfile) is also provided. Keep configuration, databases and
 credentials outside the checkout and container image.
 
