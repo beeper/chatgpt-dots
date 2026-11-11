@@ -476,7 +476,7 @@ func (c *Client) GetUserInfo(_ context.Context, g *bridgev2.Ghost) (*bridgev2.Us
 	return nil, errors.New("unknown Dot contact")
 }
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
-	return &event.RoomFeatures{ID: "chatgpt-dots.replies-reactions.v1", ReadReceipts: true, TypingNotifications: true, ReactionCount: 1, File: event.FileFeatureMap{
+	return &event.RoomFeatures{ID: "chatgpt-dots.incoming-typing.v1", ReadReceipts: true, ReactionCount: 1, File: event.FileFeatureMap{
 		"m.image":         {MimeTypes: map[string]event.CapabilitySupportLevel{"image/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.file":          {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.audio":         {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
