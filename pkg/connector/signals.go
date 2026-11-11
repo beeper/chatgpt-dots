@@ -111,6 +111,7 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 			}
 			return nil
 		})
+		c.recheck.Store(true)
 		c.requestSync(false)
 		clear()
 		if ctx.Err() != nil {
