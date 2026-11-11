@@ -1043,6 +1043,8 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	}
 	if !retry {
 		pending = PendingSend{Room: state.Profile.Room, EventID: msg.Event.ID, Sender: msg.Event.Sender, Timestamp: msg.Event.Timestamp, BodyHash: bodyHash, Media: media, KnownUnsent: true, ReplyTo: replyTo}
+	} else if !pending.KnownUnsent {
+		pending.Attempted = time.Now()
 	}
 	c.meta.Pending[requestID] = pending
 	err = c.login.Save(ctx)
@@ -1165,7 +1167,9 @@ func (c *Client) expireUncertainSend(ctx context.Context, state *RoomState, requ
 		c.mu.Unlock()
 		return nil
 	}
-	delete(c.meta.Pending, requestID)
+	expired := pending
+	expired.KnownUnsent = true
+	c.meta.Pending[requestID] = expired
 	if err := c.login.Save(ctx); err != nil {
 		c.meta.Pending[requestID] = pending
 		c.mu.Unlock()
