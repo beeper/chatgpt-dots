@@ -46,7 +46,11 @@ func (c *Connector) getProxy(ctx context.Context, reason string) (string, error)
 	req.Header.Set("User-Agent", mautrix.DefaultUserAgent)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", errors.New("proxy request failed")
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return "", fmt.Errorf("proxy request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -91,6 +95,16 @@ func newEgress(proxy *url.URL) *egress {
 	}
 	cookies, _ := cookiejar.New(nil)
 	return &egress{api: api.GetTransport(), websocket: websocket, cookies: cookies, proxyHost: proxyHost}
+}
+
+func (t *proxyTransport) host() string {
+	if t == nil {
+		return ""
+	}
+	if current := t.current.Load(); current != nil {
+		return current.proxyHost
+	}
+	return ""
 }
 
 func (e *egress) close() {

@@ -46,6 +46,7 @@ type Client struct {
 	cancel         context.CancelFunc
 	done           chan struct{}
 	loggedOut      atomic.Bool
+	proxy          atomic.Pointer[proxyTransport]
 	threadMessages map[string]*threadMessage
 	signalWake     chan struct{}
 	signalsLive    atomic.Bool
@@ -120,6 +121,7 @@ func (c *Client) sendState(state status.BridgeState) {
 func (c *Client) state(err error) bool {
 	state := status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: stateSyncFailed, Info: map[string]any{"go_error": err.Error()}}
 	var httpErr *chatgpt.HTTPError
+	var schemaErr *chatgpt.SchemaError
 	if errors.Is(err, errDotUnavailable) {
 		state = badCredentialsState(stateDotUnavailable, err)
 	} else if errors.Is(err, errDotMissing) {
@@ -129,6 +131,8 @@ func (c *Client) state(err error) bool {
 			Int("status", httpErr.Status).
 			Str("path", httpErr.Path).
 			Bool("cloudflare_challenge", httpErr.Challenge).
+			Str("detail", httpErr.Body).
+			Str("proxy_host", c.proxy.Load().host()).
 			Msg("ChatGPT request failed")
 		switch {
 		case httpErr.Status == http.StatusUnauthorized:
@@ -144,6 +148,18 @@ func (c *Client) state(err error) bool {
 		default:
 			state.Error = stateRequestFailed
 		}
+	} else if errors.As(err, &schemaErr) {
+		c.login.Log.Warn().Err(err).
+			Str("path", schemaErr.Path).
+			Int("status", schemaErr.Status).
+			Int64("content_length", schemaErr.ContentLength).
+			Int64("bytes_read", schemaErr.BytesRead).
+			Bool("truncated", schemaErr.Truncated).
+			Str("decode_error", schemaErr.Cause).
+			Str("decode_field", schemaErr.Field).
+			Int64("decode_offset", schemaErr.Offset).
+			Str("proxy_host", c.proxy.Load().host()).
+			Msg("ChatGPT request failed")
 	} else if isTransportError(err) {
 		state.Error = stateNetworkError
 	}
@@ -169,6 +185,7 @@ func (c *Client) run(ctx context.Context) {
 		return
 	}
 	proxy := &proxyTransport{connector: c.connector, log: c.login.Log}
+	c.proxy.Store(proxy)
 	api, err := chatgpt.New(creds, proxy)
 	if err != nil {
 		c.sendState(badCredentialsState(stateBadCredentials, err))

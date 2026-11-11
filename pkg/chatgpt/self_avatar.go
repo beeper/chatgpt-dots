@@ -89,7 +89,7 @@ func (c *Client) SelfAvatar(ctx context.Context, profile Profile) ([]byte, error
 		return nil, redirectErr
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New("own avatar storage denied the download")
+		return nil, fmt.Errorf("own avatar storage denied the download: HTTP %d", resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
 	if err != nil || len(data) > 4<<20 {
