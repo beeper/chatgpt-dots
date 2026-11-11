@@ -194,6 +194,9 @@ func (c *Client) run(ctx context.Context) {
 func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *proxyTransport, recheck bool) bool {
 	delay := time.Second * 3
 	recheckDelay := dotRecheckInterval
+	if recheck {
+		recheckDelay *= 2
+	}
 	for ctx.Err() == nil {
 		err := proxy.update(ctx, "connect")
 		if err == nil {
