@@ -54,6 +54,18 @@ func (c *Client) RoomSignals(ctx context.Context, p Profile) (*Room, error) {
 	return &room, nil
 }
 
+func (c *Client) MarkRead(ctx context.Context, room string, readAt time.Time) error {
+	c.mu.RLock()
+	verified := c.rooms[room]
+	c.mu.RUnlock()
+	if !verified {
+		return errors.New("refusing unverified Dot room")
+	}
+	return c.do(ctx, http.MethodPost, "/messaging/rooms/"+url.PathEscape(room)+"/read", struct {
+		ReadAt time.Time `json:"last_read_at"`
+	}{readAt.UTC()}, nil)
+}
+
 type StreamDisconnectedError struct {
 	CloseStatus websocket.StatusCode
 	PingFailed  bool

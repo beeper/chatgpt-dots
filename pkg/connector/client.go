@@ -695,6 +695,9 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 		if err := c.sendReceipt(ctx, state, receipt); err != nil {
 			return err
 		}
+		if err := c.sendHumanReceipt(ctx, state, receipt); err != nil {
+			return err
+		}
 	}
 	if full {
 		c.mu.Lock()

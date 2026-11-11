@@ -61,9 +61,11 @@ Full scans still refresh it to recover later resumes.
 
 The native WebSocket supplies typing heartbeats and triggers reconciliation for
 verified Dot rooms. Typing expires rather than being replayed after reconnect.
-Read receipts use the Dot's native read cursor and timestamp, not inferred
-activity. Reaction snapshots reconcile independently of message content.
-Typing and read receipts are incoming-only. Both participants' reactions are
+Read receipts use the native read cursors and timestamps, not inferred
+activity. Reading the chat in Beeper moves your ChatGPT read cursor to the
+newest message read, and reading it in ChatGPT marks the same message read in
+Beeper. Reaction snapshots reconcile independently of message content.
+Typing is incoming-only. Both participants' reactions are
 synced, including the owner's reactions made in ChatGPT. The native protocol
 allows one emoji per participant per message: adding another replaces it, and
 removing it uses the native reaction DELETE endpoint. Before removing a reaction,
