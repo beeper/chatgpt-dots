@@ -363,7 +363,7 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) 
 			c.rescan.Store(true)
 		} else {
 			info.Members = nil
-			portal.UpdateInfo(ctx, info, c.login, nil, time.Time{})
+			portal.UpdateInfo(ctx, info, nil, nil, time.Time{})
 		}
 	}
 	return nil
