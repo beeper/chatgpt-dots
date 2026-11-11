@@ -21,7 +21,7 @@ import (
 
 const (
 	taskWatchExpiry = time.Hour
-	taskIdleExpiry  = 24 * time.Hour
+	taskRetryExpiry = 24 * time.Hour
 	taskRefreshMin  = 15 * time.Second
 	taskRefreshMax  = 10 * time.Minute
 	taskRetryMax    = 30 * time.Minute
@@ -32,7 +32,7 @@ type threadMessage struct {
 	Message       chatgpt.Message
 	NextRefresh   time.Time
 	Backoff       time.Duration
-	Changed       time.Time
+	Refreshed     time.Time
 	TaskSynced    map[string]string
 	TaskBridged   map[networkid.MessageID]bool
 	TaskTurnsDone map[string]bool
@@ -212,7 +212,7 @@ func (c *Client) prepareThreads(state *RoomState, m *chatgpt.Message, existing [
 	watch := c.threadMessages[key]
 	created := watch == nil
 	if created {
-		watch = &threadMessage{Room: state, Changed: time.Now()}
+		watch = &threadMessage{Room: state, Refreshed: time.Now()}
 	}
 	m.Threads = make(map[string]*chatgpt.ThreadStatus, len(refs))
 	for threadID := range refs {
@@ -302,6 +302,7 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 					watch.TaskSynced[threadID] = key
 					delete(watch.TaskFailures, threadID)
 				} else {
+					message.Threads[threadID] = previous
 					failed = true
 				}
 			}
@@ -313,10 +314,10 @@ func (c *Client) refreshThreads(ctx context.Context, api *chatgpt.Client) error 
 			watch.NextRefresh = time.Now().Add(watch.Backoff)
 			continue
 		}
-		if changed && !failed {
-			watch.Changed = time.Now()
+		if !failed {
+			watch.Refreshed = time.Now()
 		}
-		if !failed && threadsSettled(watch.Message.Threads) || time.Since(watch.Changed) > taskIdleExpiry {
+		if !failed && threadsSettled(watch.Message.Threads) || failed && time.Since(watch.Refreshed) > taskRetryExpiry {
 			delete(c.threadMessages, key)
 			continue
 		}
