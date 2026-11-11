@@ -204,25 +204,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return c.doAt(ctx, "https://chatgpt.com/backend-api", method, path, body, out)
 }
 func (c *Client) doAt(ctx context.Context, origin, method, path string, body, out any) error {
-	c.authMu.Lock()
-	defer c.authMu.Unlock()
-	if time.Until(c.Identity.Expires) < 5*time.Minute {
-		if err := c.refresh(ctx); err != nil {
-			return err
-		}
-	}
-	err := c.requestRetryingReads(ctx, method, origin+path, body, out)
-	var authError *HTTPError
-	if errors.As(err, &authError) && authError.Status == 401 {
-		if err = c.refresh(ctx); err != nil {
-			return err
-		}
-		err = c.requestRetryingReads(ctx, method, origin+path, body, out)
-	}
-	return err
-}
-func (c *Client) requestRetryingReads(ctx context.Context, method, target string, body, out any) error {
-	err := c.request(ctx, method, target, body, out)
+	err := c.attempt(ctx, origin, method, path, body, out)
 	var httpErr *HTTPError
 	if method != http.MethodGet || !errors.As(err, &httpErr) || httpErr.Status < http.StatusBadGateway || httpErr.Status > http.StatusGatewayTimeout {
 		return err
@@ -234,7 +216,25 @@ func (c *Client) requestRetryingReads(ctx context.Context, method, target string
 		return err
 	case <-timer.C:
 	}
-	return c.request(ctx, method, target, body, out)
+	return c.attempt(ctx, origin, method, path, body, out)
+}
+func (c *Client) attempt(ctx context.Context, origin, method, path string, body, out any) error {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	if time.Until(c.Identity.Expires) < 5*time.Minute {
+		if err := c.refresh(ctx); err != nil {
+			return err
+		}
+	}
+	err := c.request(ctx, method, origin+path, body, out)
+	var authError *HTTPError
+	if errors.As(err, &authError) && authError.Status == 401 {
+		if err = c.refresh(ctx); err != nil {
+			return err
+		}
+		err = c.request(ctx, method, origin+path, body, out)
+	}
+	return err
 }
 func (c *Client) request(ctx context.Context, method, target string, body, out any) error {
 	var reader io.Reader
