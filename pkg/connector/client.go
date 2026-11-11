@@ -54,6 +54,7 @@ type Client struct {
 	delivered      map[string][32]byte
 	deliveredOrder []string
 	selfAvatarFail string
+	profileStale   atomic.Bool
 	selfAvatarTime time.Time
 }
 
@@ -419,6 +420,12 @@ func (c *Client) refreshSelfAvatar(ctx context.Context, api *chatgpt.Client, mem
 	c.mu.Unlock()
 	return true
 }
+func (c *Client) profileChanged(state *RoomState, room *chatgpt.Room) bool {
+	dot, self := room.Member(state.DotMember), room.Member(state.HumanMember).AvatarID()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return dot.Name != "" && dot.Name != state.Profile.Name || state.Avatar != nil && string(state.Avatar.ID) != dot.AvatarID() || self != c.meta.SelfAvatarID && self != c.selfAvatarFail
+}
 func (c *Client) refreshDotAvatar(api *chatgpt.Client, state *RoomState, member chatgpt.RoomMember) {
 	avatarID := networkid.AvatarID(member.AvatarID())
 	c.mu.Lock()
@@ -574,6 +581,12 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 		receipt, err := c.readReceipt(ctx, api, state)
 		if err != nil {
 			return err
+		}
+		if c.profileStale.Swap(false) {
+			if err = c.verify(ctx, api); err != nil {
+				c.profileStale.Store(true)
+				return err
+			}
 		}
 		for id, retry := range state.Media {
 			if time.Now().Before(retry.Next) {

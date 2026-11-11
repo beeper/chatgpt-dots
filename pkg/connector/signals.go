@@ -87,7 +87,7 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 					c.sendTyping(ctx, state, 0)
 				}
 				c.requestSync(false)
-			case "calpico-message-update", "calpico-room-read-receipt", "calpico-room-metadata-update":
+			case "calpico-message-update", "calpico-room-read-receipt", "calpico-room-metadata-update", "calpico-room-update":
 				c.requestSync(false)
 			case "calpico-room-leave":
 				c.requestSync(true)
@@ -143,6 +143,9 @@ func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *Ro
 	}
 	if len(room.Members) != 2 || !dot || !human {
 		return nil, errors.New("Dot room signal members changed")
+	}
+	if c.profileChanged(state, room) {
+		c.profileStale.Store(true)
 	}
 	receipt := c.receipts[state.Profile.Room]
 	if receipt == nil {
