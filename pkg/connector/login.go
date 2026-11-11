@@ -31,6 +31,7 @@ type LoginMetadata struct {
 	ConfirmationsSynced bool                          `json:"confirmations_synced,omitempty"`
 	ConfirmationVersion int                           `json:"confirmation_version,omitempty"`
 	Rescan              bool                          `json:"rescan,omitempty"`
+	SelfAvatarHash      string                        `json:"self_avatar_hash,omitempty"`
 	SelfAvatarID        string                        `json:"self_avatar_id,omitempty"`
 }
 type PendingSend struct {

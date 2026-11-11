@@ -126,11 +126,26 @@ func (m RoomMember) AvatarID() string {
 	if m.AvatarFileID != "" {
 		return m.AvatarFileID
 	}
-	if u, err := url.Parse(m.AvatarURL); err == nil {
-		u.RawQuery, u.Fragment = "", ""
-		return u.String()
+	u, err := url.Parse(m.AvatarURL)
+	if err != nil {
+		return m.AvatarURL
 	}
-	return m.AvatarURL
+	switch {
+	case strings.HasSuffix(u.Hostname(), ".oaiusercontent.com"):
+		u.RawQuery = ""
+	case u.Hostname() == "chatgpt.com":
+		u.RawQuery = url.Values{"id": u.Query()["id"]}.Encode()
+	}
+	u.Fragment = ""
+	return u.String()
+}
+
+func (m RoomMember) AvatarContentMayChange() bool {
+	host := m.AvatarURL
+	if u, err := url.Parse(m.AvatarURL); err == nil {
+		host = u.Hostname()
+	}
+	return m.AvatarFileID == "" && (host == "gravatar.com" || strings.HasSuffix(host, ".gravatar.com"))
 }
 
 type Page struct {

@@ -389,25 +389,33 @@ func (c *Client) refreshSelfAvatar(ctx context.Context, api *chatgpt.Client, mem
 	c.mu.RLock()
 	unchanged := avatarID == c.meta.SelfAvatarID && (c.login.RemoteProfile.Avatar != "") == (avatarID != "")
 	c.mu.RUnlock()
-	if unchanged || avatarID == c.selfAvatarFail && time.Since(c.selfAvatarTime) < avatarRetryInterval {
+	recent := time.Since(c.selfAvatarTime) < avatarRetryInterval
+	if unchanged && (!member.AvatarContentMayChange() || recent) || avatarID == c.selfAvatarFail && recent {
 		return false
 	}
+	c.selfAvatarTime = time.Now()
 	var mxc id.ContentURIString
 	var file *event.EncryptedFileInfo
+	hash := ""
 	if avatarID != "" {
 		data, err := api.SelfAvatar(ctx, member.AvatarURL)
 		if err == nil {
+			sum := sha256.Sum256(data)
+			hash = hex.EncodeToString(sum[:])
+			if unchanged && hash == c.meta.SelfAvatarHash {
+				return false
+			}
 			mxc, file, err = c.connector.bridge.Bot.UploadMedia(ctx, "", data, "avatar", http.DetectContentType(data))
 		}
 		if err != nil {
 			c.login.Log.Warn().Err(err).Msg("Could not update own account avatar")
-			c.selfAvatarFail, c.selfAvatarTime = avatarID, time.Now()
+			c.selfAvatarFail = avatarID
 			return false
 		}
 	}
 	c.mu.Lock()
 	c.login.RemoteProfile.Avatar, c.login.RemoteProfile.AvatarFile = mxc, file
-	c.meta.SelfAvatarID = avatarID
+	c.meta.SelfAvatarID, c.meta.SelfAvatarHash = avatarID, hash
 	c.mu.Unlock()
 	return true
 }
