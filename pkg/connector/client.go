@@ -1077,6 +1077,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	room, err := api.Verify(ctx, state.Profile)
 	if err != nil {
 		c.state(err)
+		c.requestSync(false)
 		return nil, wrapSendError(err, certain)
 	}
 	current, err := roomMembers(api, state.Profile, room)
@@ -1190,6 +1191,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 		var httpErr *chatgpt.HTTPError
 		if errors.As(err, &httpErr) && (httpErr.Status == 401 || httpErr.Status == 403) {
 			c.state(err)
+			c.requestSync(false)
 		}
 		if certain {
 			c.mu.Lock()
