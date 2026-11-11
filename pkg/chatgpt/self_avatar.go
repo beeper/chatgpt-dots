@@ -3,7 +3,6 @@ package chatgpt
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -13,44 +12,7 @@ import (
 	"strings"
 )
 
-func (c *Client) SelfAvatar(ctx context.Context, profile Profile) ([]byte, error) {
-	c.mu.RLock()
-	verified := c.rooms[profile.Room]
-	c.mu.RUnlock()
-	if !verified {
-		return nil, errors.New("refusing own avatar lookup in an unverified Dot room")
-	}
-	var room struct {
-		Room
-		Members []struct {
-			ID     string          `json:"account_user_id"`
-			Aeon   string          `json:"aeon_id"`
-			Avatar json.RawMessage `json:"avatar_url"`
-		} `json:"members"`
-	}
-	if err := c.do(ctx, "GET", "/messaging/rooms/"+url.PathEscape(profile.Room), nil, &room); err != nil {
-		return nil, err
-	}
-	if room.Type != "DM" || room.Source != "chatgpt:messaging" || room.ID != profile.Room || room.Aeon != profile.ID {
-		return nil, errors.New("Dot room identity changed during own avatar lookup")
-	}
-	var avatarURL string
-	selfCount := 0
-	dotFound := false
-	for _, member := range room.Members {
-		if member.Aeon == profile.ID && member.ID != "" {
-			dotFound = true
-		}
-		if c.Identity.IsSelf(member.ID) && member.Aeon == "" {
-			selfCount++
-			if len(member.Avatar) == 0 || json.Unmarshal(member.Avatar, &avatarURL) != nil {
-				return nil, errors.New("own avatar field missing or invalid in Dot room")
-			}
-		}
-	}
-	if selfCount != 1 || !dotFound {
-		return nil, errors.New("Dot room does not identify the original account and Dot")
-	}
+func (c *Client) SelfAvatar(ctx context.Context, avatarURL string) ([]byte, error) {
 	if avatarURL == "" {
 		return nil, nil
 	}

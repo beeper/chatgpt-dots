@@ -27,10 +27,10 @@ import (
 )
 
 const (
-	pollInterval          = 3 * time.Second
-	livePollInterval      = 30 * time.Second
-	avatarRefreshInterval = 30 * time.Minute
-	dotRecheckInterval    = 5 * time.Minute
+	pollInterval        = 3 * time.Second
+	livePollInterval    = 30 * time.Second
+	avatarRetryInterval = 30 * time.Minute
+	dotRecheckInterval  = 5 * time.Minute
 )
 
 type Client struct {
@@ -53,6 +53,8 @@ type Client struct {
 	receipts       map[string]*receiptState
 	delivered      map[string][32]byte
 	deliveredOrder []string
+	selfAvatarFail string
+	selfAvatarTime time.Time
 }
 
 func (c *Client) Connect(ctx context.Context) {
@@ -196,7 +198,7 @@ func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *pro
 	for ctx.Err() == nil {
 		err := proxy.update(ctx, "connect")
 		if err == nil {
-			err = c.verify(ctx, api, true)
+			err = c.verify(ctx, api)
 		}
 		if err == nil {
 			return true
@@ -232,7 +234,6 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 	defer func() { stopStream(); <-streamDone }()
 	delay := pollInterval
 	nextProfileRefresh := time.Now().Add(time.Minute)
-	nextAvatarRefresh := time.Now().Add(avatarRefreshInterval)
 	var nextPoll time.Time
 	for ctx.Err() == nil {
 		var err error
@@ -245,11 +246,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 		}
 		err = errors.Join(err, c.refreshThreads(ctx, api))
 		if !time.Now().Before(nextProfileRefresh) {
-			avatars := !time.Now().Before(nextAvatarRefresh)
-			if avatars {
-				nextAvatarRefresh = time.Now().Add(avatarRefreshInterval)
-			}
-			if profileErr := c.verify(ctx, api, avatars); errors.Is(profileErr, errDotUnavailable) || errors.Is(profileErr, errDotMissing) {
+			if profileErr := c.verify(ctx, api); errors.Is(profileErr, errDotUnavailable) || errors.Is(profileErr, errDotMissing) {
 				c.state(profileErr)
 				return true
 			} else if profileErr != nil {
@@ -305,7 +302,7 @@ func wait(ctx context.Context, d time.Duration) bool {
 		return true
 	}
 }
-func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) error {
+func (c *Client) verify(ctx context.Context, api *chatgpt.Client) error {
 	for _, state := range c.meta.Rooms {
 		r, err := api.Verify(ctx, state.Profile)
 		if err != nil {
@@ -318,12 +315,14 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) 
 		if current.DotMember != state.DotMember || current.HumanMember != state.HumanMember {
 			return errors.New("Dot room members changed; refusing to change existing identity mappings")
 		}
-		if avatars {
-			c.refreshSelfAvatar(ctx, api, state)
-			c.refreshDotAvatar(ctx, api, state)
-		}
+		changed := c.refreshSelfAvatar(ctx, api, r.Member(state.HumanMember))
+		c.refreshDotAvatar(api, state, r.Member(state.DotMember))
 		c.mu.Lock()
-		changed := avatars || state.HumanName != current.HumanName || c.login.RemoteProfile.Name != current.HumanName
+		if name := r.Member(state.DotMember).Name; name != "" && name != state.Profile.Name {
+			state.Profile.Name = name
+			changed = true
+		}
+		changed = changed || state.HumanName != current.HumanName || c.login.RemoteProfile.Name != current.HumanName
 		state.HumanName = current.HumanName
 		c.login.RemoteProfile.Name = current.HumanName
 		if email := api.Identity.Email; email != "" {
@@ -385,55 +384,59 @@ func (c *Client) checkDotReplaced(ctx context.Context, api *chatgpt.Client, stat
 	}
 	return err
 }
-func (c *Client) refreshSelfAvatar(ctx context.Context, api *chatgpt.Client, state *RoomState) {
-	data, err := api.SelfAvatar(ctx, state.Profile)
-	if err != nil {
-		c.login.Log.Warn().Err(err).Msg("Could not update own account avatar")
-		return
-	}
-	hash := ""
-	if len(data) > 0 {
-		sum := sha256.Sum256(data)
-		hash = hex.EncodeToString(sum[:])
-	}
+func (c *Client) refreshSelfAvatar(ctx context.Context, api *chatgpt.Client, member chatgpt.RoomMember) bool {
+	avatarID := member.AvatarID()
 	c.mu.RLock()
-	unchanged := hash == c.meta.SelfAvatarHash && (c.login.RemoteProfile.Avatar != "") == (len(data) > 0)
+	unchanged := avatarID == c.meta.SelfAvatarID && (c.login.RemoteProfile.Avatar != "") == (avatarID != "")
 	c.mu.RUnlock()
-	if unchanged {
-		return
+	if unchanged || avatarID == c.selfAvatarFail && time.Since(c.selfAvatarTime) < avatarRetryInterval {
+		return false
 	}
 	var mxc id.ContentURIString
 	var file *event.EncryptedFileInfo
-	if len(data) > 0 {
-		if mxc, file, err = c.connector.bridge.Bot.UploadMedia(ctx, "", data, "avatar", http.DetectContentType(data)); err != nil {
+	if avatarID != "" {
+		data, err := api.SelfAvatar(ctx, member.AvatarURL)
+		if err == nil {
+			mxc, file, err = c.connector.bridge.Bot.UploadMedia(ctx, "", data, "avatar", http.DetectContentType(data))
+		}
+		if err != nil {
 			c.login.Log.Warn().Err(err).Msg("Could not update own account avatar")
-			return
+			c.selfAvatarFail, c.selfAvatarTime = avatarID, time.Now()
+			return false
 		}
 	}
 	c.mu.Lock()
 	c.login.RemoteProfile.Avatar, c.login.RemoteProfile.AvatarFile = mxc, file
-	c.meta.SelfAvatarHash = hash
+	c.meta.SelfAvatarID = avatarID
 	c.mu.Unlock()
+	return true
 }
-func (c *Client) refreshDotAvatar(ctx context.Context, api *chatgpt.Client, state *RoomState) {
-	current, data, err := api.Avatar(ctx, state.Profile)
-	if current.ID == state.Profile.ID {
-		c.mu.Lock()
-		state.Profile.Name = current.Name
-		c.mu.Unlock()
-	}
-	if err != nil {
-		c.login.Log.Warn().Err(err).Msg("Could not update Dot avatar")
+func (c *Client) refreshDotAvatar(api *chatgpt.Client, state *RoomState, member chatgpt.RoomMember) {
+	avatarID := networkid.AvatarID(member.AvatarID())
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if avatarID == "" {
+		state.Avatar = &bridgev2.Avatar{Remove: true}
 		return
 	}
-	avatar := &bridgev2.Avatar{Remove: true}
-	if len(data) > 0 {
-		hash := sha256.Sum256(data)
-		avatar = &bridgev2.Avatar{ID: networkid.AvatarID(hex.EncodeToString(hash[:])), Get: func(context.Context) ([]byte, error) { return data, nil }}
+	if state.Avatar != nil && state.Avatar.ID == avatarID && (state.avatarFailed.IsZero() || time.Since(state.avatarFailed) < avatarRetryInterval) {
+		return
 	}
-	c.mu.Lock()
-	state.Avatar = avatar
-	c.mu.Unlock()
+	state.avatarFailed = time.Time{}
+	var once sync.Once
+	var data []byte
+	var err error
+	state.Avatar = &bridgev2.Avatar{ID: avatarID, Get: func(ctx context.Context) ([]byte, error) {
+		once.Do(func() {
+			if data, err = api.DotAvatar(ctx, member.AvatarURL); err != nil {
+				c.login.Log.Warn().Err(err).Msg("Could not update Dot avatar")
+				c.mu.Lock()
+				state.avatarFailed = time.Now()
+				c.mu.Unlock()
+			}
+		})
+		return data, err
+	}}
 }
 func (c *Client) key(s *RoomState) networkid.PortalKey {
 	return networkid.PortalKey{ID: networkid.PortalID(s.Profile.Room), Receiver: c.login.ID}
