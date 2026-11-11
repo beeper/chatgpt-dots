@@ -583,9 +583,8 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			return err
 		}
 		if c.profileStale.Swap(false) {
-			if err = c.verify(ctx, api); err != nil {
-				c.profileStale.Store(true)
-				return err
+			if profileErr := c.verify(ctx, api); profileErr != nil {
+				c.login.Log.Warn().Err(profileErr).Msg("Could not refresh ChatGPT profiles")
 			}
 		}
 		for id, retry := range state.Media {
