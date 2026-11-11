@@ -211,15 +211,30 @@ func (c *Client) doAt(ctx context.Context, origin, method, path string, body, ou
 			return err
 		}
 	}
-	err := c.request(ctx, method, origin+path, body, out)
+	err := c.requestRetryingReads(ctx, method, origin+path, body, out)
 	var authError *HTTPError
 	if errors.As(err, &authError) && authError.Status == 401 {
 		if err = c.refresh(ctx); err != nil {
 			return err
 		}
-		err = c.request(ctx, method, origin+path, body, out)
+		err = c.requestRetryingReads(ctx, method, origin+path, body, out)
 	}
 	return err
+}
+func (c *Client) requestRetryingReads(ctx context.Context, method, target string, body, out any) error {
+	err := c.request(ctx, method, target, body, out)
+	var httpErr *HTTPError
+	if method != http.MethodGet || !errors.As(err, &httpErr) || httpErr.Status < http.StatusBadGateway || httpErr.Status > http.StatusGatewayTimeout {
+		return err
+	}
+	timer := time.NewTimer(unavailableReadRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return err
+	case <-timer.C:
+	}
+	return c.request(ctx, method, target, body, out)
 }
 func (c *Client) request(ctx context.Context, method, target string, body, out any) error {
 	var reader io.Reader
@@ -281,8 +296,9 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 }
 
 const (
-	maxResponseBytes         = 4 << 20
-	maxStreamedResponseBytes = 64 << 20
+	maxResponseBytes          = 4 << 20
+	maxStreamedResponseBytes  = 64 << 20
+	unavailableReadRetryDelay = time.Second
 )
 
 type SchemaError struct {
