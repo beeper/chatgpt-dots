@@ -31,6 +31,7 @@ const (
 	livePollInterval      = 30 * time.Second
 	avatarRefreshInterval = 30 * time.Minute
 	dotRecheckInterval    = 5 * time.Minute
+	uncertainSendWindow   = 2 * time.Minute
 )
 
 type Client struct {
@@ -629,6 +630,8 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 					}
 					pending = errors.Join(pending, err)
 				}
+			} else if err = c.expireUncertainSend(ctx, state, requestID); err != nil {
+				return err
 			}
 		}
 		seen := map[string]bool{}
@@ -973,6 +976,13 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	runContext := c.runContext
 	state := c.meta.Rooms[string(msg.Portal.ID)]
 	prior, hadPrior := c.meta.Pending[requestID]
+	var searchFrom string
+	if state != nil {
+		searchFrom = state.Cursor
+		if len(state.Overlap) > 0 {
+			searchFrom = state.Overlap[0]
+		}
+	}
 	c.mu.RUnlock()
 	certain := !hadPrior || prior.KnownUnsent
 	if api == nil || runContext == nil || runContext.Err() != nil || !c.IsLoggedIn() {
@@ -1041,7 +1051,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 		return nil, err
 	}
 	if retry && !pending.KnownUnsent {
-		found, err := c.findRequest(ctx, api, state, requestID, state.Baseline)
+		found, err := c.findRequest(ctx, api, state, requestID, searchFrom)
 		if err != nil {
 			return nil, wrapSendError(err, false)
 		}
@@ -1087,6 +1097,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 		attachments = []chatgpt.FileReference{{Type: "file", FileID: pending.FileID}}
 	}
 	pending.KnownUnsent = false
+	pending.Attempted = time.Now()
 	c.mu.Lock()
 	c.meta.Pending[requestID] = pending
 	err = c.login.Save(ctx)
@@ -1142,6 +1153,38 @@ func (c *Client) sendResponse(m chatgpt.Message, media bool, generation context.
 			c.meta.Pending[m.RequestID] = pending
 		}
 	}}
+}
+func (c *Client) expireUncertainSend(ctx context.Context, state *RoomState, requestID string) error {
+	c.mu.Lock()
+	pending, ok := c.meta.Pending[requestID]
+	attempted := pending.Attempted
+	if attempted.IsZero() {
+		attempted = time.UnixMilli(pending.Timestamp)
+	}
+	if !ok || pending.KnownUnsent || time.Since(attempted) < uncertainSendWindow {
+		c.mu.Unlock()
+		return nil
+	}
+	delete(c.meta.Pending, requestID)
+	if err := c.login.Save(ctx); err != nil {
+		c.meta.Pending[requestID] = pending
+		c.mu.Unlock()
+		return err
+	}
+	c.mu.Unlock()
+	c.login.Log.Warn().Str("request_id", requestID).Stringer("event_id", pending.EventID).Time("attempted", attempted).Msg("ChatGPT never listed an uncertain send; marking it failed")
+	portal, err := c.connector.bridge.GetExistingPortalByKey(ctx, c.key(state))
+	if err != nil || portal == nil || portal.MXID == "" {
+		return err
+	}
+	ms := bridgev2.WrapErrorInStatus(errors.New("uncertain send never appeared in the Dot chat")).
+		WithStatus(event.MessageStatusRetriable).
+		WithErrorReason(event.MessageStatusNetworkError).
+		WithMessage("ChatGPT didn't receive this message, try sending it again").
+		WithIsCertain(true).
+		WithSendNotice(true)
+	c.connector.bridge.Matrix.SendMessageStatus(ctx, &ms, &bridgev2.MessageStatusEventInfo{RoomID: portal.MXID, SourceEventID: pending.EventID, EventType: event.EventMessage, Sender: pending.Sender})
+	return nil
 }
 func (c *Client) findRequest(ctx context.Context, api *chatgpt.Client, state *RoomState, requestID, after string) (*chatgpt.Message, error) {
 	c.mu.RLock()

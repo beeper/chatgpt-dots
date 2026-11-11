@@ -44,6 +44,7 @@ type PendingSend struct {
 	Timestamp   int64      `json:"timestamp"`
 	BodyHash    string     `json:"body_hash"`
 	ReplyTo     string     `json:"reply_to,omitempty"`
+	Attempted   time.Time  `json:"attempted,omitzero"`
 }
 type RoomState struct {
 	Avatar      *bridgev2.Avatar      `json:"-"`
