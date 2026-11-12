@@ -30,6 +30,7 @@ func (c *Client) PreHandleMatrixReaction(_ context.Context, msg *bridgev2.Matrix
 }
 
 func (c *Client) reactionClient(ctx context.Context, portal *bridgev2.Portal, room networkid.PortalKey) (context.Context, *chatgpt.Client, *RoomState, func(), error) {
+	c.waitForConnect(ctx)
 	c.mu.RLock()
 	api, generation := c.api, c.runContext
 	state := c.meta.Rooms[string(room.ID)]

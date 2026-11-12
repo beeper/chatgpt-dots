@@ -105,6 +105,7 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	}
 	client.sendMu.Lock()
 	defer client.sendMu.Unlock()
+	client.waitForConnect(ce.Ctx)
 	client.mu.RLock()
 	api, run := client.api, client.runContext
 	room := client.meta.Rooms[string(ce.Portal.ID)]
