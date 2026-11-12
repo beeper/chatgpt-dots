@@ -146,6 +146,16 @@ func (t *proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		return nil, err
 	}
+	switch resp.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		t.failed.Store(true)
+		t.log.Warn().
+			Int("status", resp.StatusCode).
+			Str("proxy_host", current.proxyHost).
+			Str("host", r.URL.Host).
+			Str("path", r.URL.Path).
+			Msg("ChatGPT gateway error")
+	}
 	var keep []*http.Cookie
 	for _, cookie := range resp.Cookies() {
 		if slices.Contains(cloudflareCookies, cookie.Name) {
