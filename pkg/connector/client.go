@@ -386,6 +386,9 @@ func (c *Client) nextWake(next time.Time) time.Time {
 			}
 		}
 	}
+	if earliest := time.Now().Add(pollInterval); next.Before(earliest) {
+		next = earliest
+	}
 	return next
 }
 func wait(ctx context.Context, d time.Duration) bool {
@@ -1022,7 +1025,7 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		return err
 	}
 	if incomingStale(m, existing) {
-		return nil
+		return c.clearPending(ctx, m.RequestID)
 	}
 	c.prepareThreads(state, &m, existing)
 	var cleanup func() error
@@ -1180,17 +1183,18 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	if err = c.saveMessageMetadata(ctx, m, saved); err != nil {
 		return err
 	}
+	return c.clearPending(ctx, m.RequestID)
+}
+func (c *Client) clearPending(ctx context.Context, requestID string) error {
 	c.mu.Lock()
-	pending, exists := c.meta.Pending[m.RequestID]
-	if exists {
-		delete(c.meta.Pending, m.RequestID)
-		err = c.login.Save(ctx)
-		if err != nil {
-			c.meta.Pending[m.RequestID] = pending
-		}
+	defer c.mu.Unlock()
+	pending, exists := c.meta.Pending[requestID]
+	if !exists {
+		return nil
 	}
-	c.mu.Unlock()
-	if err != nil {
+	delete(c.meta.Pending, requestID)
+	if err := c.login.Save(ctx); err != nil {
+		c.meta.Pending[requestID] = pending
 		return err
 	}
 	return nil
