@@ -689,13 +689,17 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			}
 		}
 		c.mu.RUnlock()
+		searchFrom := after
+		if !full && len(state.Overlap) > 0 {
+			searchFrom = state.Overlap[0]
+		}
 		for _, requestID := range pendingIDs {
-			m, err := c.findRequest(ctx, api, state, requestID, after)
+			m, err := c.findRequest(ctx, api, state, requestID, searchFrom)
 			if err != nil {
 				return err
 			}
 			if m != nil {
-				if err = c.deliverMedia(ctx, state, *m, after); err != nil {
+				if err = c.deliverMedia(ctx, state, *m, searchFrom); err != nil {
 					if !onlyMediaRetries(err) {
 						return err
 					}
