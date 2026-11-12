@@ -602,7 +602,7 @@ func (c *Client) HandleMatrixMembership(_ context.Context, msg *bridgev2.MatrixM
 	return nil, nil
 }
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
-	return &event.RoomFeatures{ID: "chatgpt-dots.formatting.v1", ReadReceipts: true, TypingNotifications: true, ReactionCount: 1, Formatting: event.FormattingFeatureMap{
+	return &event.RoomFeatures{ID: "chatgpt-dots.incoming-typing.v1", ReadReceipts: true, ReactionCount: 1, Formatting: event.FormattingFeatureMap{
 		event.FmtBold:          event.CapLevelFullySupported,
 		event.FmtItalic:        event.CapLevelFullySupported,
 		event.FmtStrikethrough: event.CapLevelFullySupported,
