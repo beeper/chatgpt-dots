@@ -84,8 +84,12 @@ binds the request definition to its persisted message in that account and room.
 Before submitting a decision the
 connector verifies the account, room members, original Dot sender, request
 definition and provider's current request fingerprint. Only confirmations
-with no form fields or one native confirmation checkbox can be
+with no form fields or one native confirmation checkbox, and Codex tool
+approvals (`_meta.codex_approval_kind` `mcp_tool_call` with no form fields), can be
 answered from Beeper; other requests link to the native ChatGPT interface.
+`!dots accept-conversation <code>` and `!dots accept-always <code>` accept a tool
+approval with `_meta.persist` `session` or `always`, only when the request lists
+that option.
 
 The login metadata reserves the decision before submission. Only a provider
 `applied` response is reported as confirmation. An ambiguous response remains

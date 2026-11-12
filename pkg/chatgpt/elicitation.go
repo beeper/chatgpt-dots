@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -42,6 +44,9 @@ func (e *Elicitation) Binary() bool {
 func (e *Elicitation) AcceptContent() (map[string]any, bool) {
 	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" {
 		return nil, false
+	}
+	if _, ok := e.ToolApproval(); ok {
+		return map[string]any{}, true
 	}
 	if e.Params.Server == "browser" || e.Params.Server == "browser-use" {
 		return nil, false
@@ -85,6 +90,43 @@ func (e *Elicitation) AcceptContent() (map[string]any, bool) {
 	return map[string]any{confirmation.Field: true}, true
 }
 
+// ToolApproval reports whether this is a Codex tool-call approval and which remembered approvals it offers.
+func (e *Elicitation) ToolApproval() ([]string, bool) {
+	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" {
+		return nil, false
+	}
+	var meta map[string]json.RawMessage
+	if json.Unmarshal(e.Params.Meta, &meta) != nil || string(meta["codex_approval_kind"]) != `"mcp_tool_call"` {
+		return nil, false
+	}
+	if input, ok := meta["codex_requires_user_input"]; ok && string(input) != "false" {
+		return nil, false
+	}
+	var schema struct {
+		Type       string                     `json:"type"`
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if json.Unmarshal(e.Params.Schema, &schema) != nil || schema.Type != "object" || schema.Properties == nil || len(schema.Properties) != 0 || len(schema.Required) != 0 {
+		return nil, false
+	}
+	var persist []string
+	if raw := meta["persist"]; len(raw) != 0 && string(raw) != "null" {
+		var one string
+		if json.Unmarshal(raw, &one) == nil {
+			persist = []string{one}
+		} else if json.Unmarshal(raw, &persist) != nil {
+			return nil, false
+		}
+	}
+	for _, option := range persist {
+		if option != "session" && option != "always" {
+			return nil, false
+		}
+	}
+	return persist, true
+}
+
 func (e *Elicitation) Summary() string {
 	if e == nil {
 		return ""
@@ -93,6 +135,11 @@ func (e *Elicitation) Summary() string {
 	var meta struct {
 		Reason       string          `json:"reason"`
 		Confirmation json.RawMessage `json:"openai/confirmation"`
+		Params       json.RawMessage `json:"tool_params"`
+		Display      []struct {
+			Name  string          `json:"display_name"`
+			Value json.RawMessage `json:"value"`
+		} `json:"tool_params_display"`
 	}
 	var confirmation struct {
 		Presentation struct {
@@ -111,6 +158,28 @@ func (e *Elicitation) Summary() string {
 		for _, field := range confirmation.Presentation.Fields {
 			if strings.TrimSpace(field.Value) != "" && !strings.Contains(text, field.Value) {
 				text += "\n\n" + field.Label + " " + field.Value
+			}
+		}
+		if _, ok := e.ToolApproval(); ok {
+			if len(meta.Display) == 0 {
+				var params map[string]json.RawMessage
+				_ = json.Unmarshal(meta.Params, &params)
+				for _, name := range slices.Sorted(maps.Keys(params)) {
+					meta.Display = append(meta.Display, struct {
+						Name  string          `json:"display_name"`
+						Value json.RawMessage `json:"value"`
+					}{name, params[name]})
+				}
+			}
+			for _, param := range meta.Display {
+				value := string(param.Value)
+				_ = json.Unmarshal(param.Value, &value)
+				if runes := []rune(value); len(runes) > 500 {
+					value = string(runes[:500]) + "…"
+				}
+				if strings.TrimSpace(value) != "" {
+					text += "\n\n" + param.Name + ": " + value
+				}
 			}
 		}
 	}
@@ -169,7 +238,7 @@ func (c *Client) ReadElicitation(ctx context.Context, room, message string) (*El
 	return &state, nil
 }
 
-func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerprint, action string, elicitation *Elicitation) (bool, error) {
+func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerprint, action, persist string, elicitation *Elicitation) (bool, error) {
 	path, err := c.elicitationPath(room, message)
 	if err != nil {
 		return false, err
@@ -192,6 +261,13 @@ func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerpr
 		if !ok {
 			return false, errors.New("confirmation needs the ChatGPT interface")
 		}
+	}
+	if persist != "" {
+		offered, _ := elicitation.ToolApproval()
+		if action != "accept" || !slices.Contains(offered, persist) {
+			return false, errors.New("ChatGPT did not offer this approval option")
+		}
+		body.Result.Meta = map[string]any{"persist": persist}
 	}
 	var response struct {
 		Status string `json:"status"`

@@ -29,7 +29,10 @@ not supported. Some native message formats remain unsupported. See the
 When a Dot asks for confirmation, the card includes a command such as
 `!dots accept a1b2c3d4e5f6`. Send that command in the chat to accept, or use
 `!dots decline a1b2c3d4e5f6` to decline. `!dots check a1b2c3d4e5f6` reads its
-status. No quoted reply is needed. Ordinary messages such as “Yes” stay chat
+status. Tool approvals, such as letting the Dot use an app or download from a
+site, also offer `!dots accept-conversation <code>` to allow that tool for the
+rest of the ChatGPT conversation and `!dots accept-always <code>` to always
+allow it, when ChatGPT offers those choices. No quoted reply is needed. Ordinary messages such as “Yes” stay chat
 messages. Requests that need other form fields, sign-in, location
 or verification direct you to ChatGPT. A decision with an uncertain outcome
 is never automatically submitted again, including after a restart.
