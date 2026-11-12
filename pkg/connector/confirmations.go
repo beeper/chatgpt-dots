@@ -103,9 +103,9 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	if !ok {
 		return "", false, errors.New("This is not a ChatGPT Dots conversation")
 	}
+	client.waitForConnect(ce.Ctx)
 	client.sendMu.Lock()
 	defer client.sendMu.Unlock()
-	client.waitForConnect(ce.Ctx)
 	client.mu.RLock()
 	api, run := client.api, client.runContext
 	room := client.meta.Rooms[string(ce.Portal.ID)]

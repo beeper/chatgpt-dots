@@ -1221,6 +1221,7 @@ func (c *Client) clearPending(ctx context.Context, requestID string) error {
 	return nil
 }
 func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
+	c.waitForConnect(ctx)
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	media := msg.Content.MsgType == event.MsgImage || msg.Content.MsgType == event.MsgFile || msg.Content.MsgType == event.MsgVideo || msg.Content.MsgType == event.MsgAudio
@@ -1237,7 +1238,6 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 			WithSendNotice(true)
 	}
 	requestID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(string(c.login.ID)+"\x00"+string(msg.Event.ID))).String()
-	c.waitForConnect(ctx)
 	c.mu.RLock()
 	api := c.api
 	runContext := c.runContext
