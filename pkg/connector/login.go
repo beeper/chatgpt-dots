@@ -32,6 +32,7 @@ type LoginMetadata struct {
 	ConfirmationVersion int                           `json:"confirmation_version,omitempty"`
 	Rescan              bool                          `json:"rescan,omitempty"`
 	SelfAvatarHash      string                        `json:"self_avatar_hash,omitempty"`
+	SelfAvatarID        string                        `json:"self_avatar_id,omitempty"`
 }
 type PendingSend struct {
 	// Missing in older records means delivery may have happened.
@@ -58,6 +59,8 @@ type RoomState struct {
 	Cursor      string                `json:"cursor"`
 	Overlap     []string              `json:"overlap"`
 	Media       map[string]MediaRetry `json:"media,omitempty"`
+
+	avatarFailed time.Time
 }
 type MediaRetry struct {
 	Start    string        `json:"start"`

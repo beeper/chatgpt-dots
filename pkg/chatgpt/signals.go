@@ -36,6 +36,9 @@ type Signal struct {
 			ID     string `json:"id"`
 			Member string `json:"account_user_id"`
 		} `json:"message"`
+		RoomInfo struct {
+			ID string `json:"id"`
+		} `json:"room"`
 	} `json:"payload"`
 }
 
@@ -203,6 +206,9 @@ func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) e
 			var signal Signal
 			if json.Unmarshal(frame.Payload, &signal) != nil {
 				continue
+			}
+			if signal.Payload.Room == "" {
+				signal.Payload.Room = signal.Payload.RoomInfo.ID
 			}
 			c.mu.RLock()
 			verified := c.rooms[signal.Payload.Room]
