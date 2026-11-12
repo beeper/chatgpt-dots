@@ -213,6 +213,10 @@ func (c *Client) run(ctx context.Context) {
 }
 func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *proxyTransport, recheck bool) bool {
 	delay := time.Second * 3
+	recheckDelay := dotRecheckInterval
+	if recheck {
+		recheckDelay *= 2
+	}
 	for ctx.Err() == nil {
 		err := proxy.update(ctx, "connect")
 		if err == nil {
@@ -225,10 +229,14 @@ func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *pro
 		if errors.Is(err, errDotMissing) && recheck {
 			err = fmt.Errorf("%w: %w", errDotUnavailable, err)
 		}
-		if errors.Is(err, errDotUnavailable) || errors.Is(err, errDotMissing) {
+		if errors.Is(err, errDotReplaced) {
+			c.state(err)
+			return false
+		} else if errors.Is(err, errDotUnavailable) || errors.Is(err, errDotMissing) {
 			c.state(err)
 			recheck = true
-			next = dotRecheckInterval
+			next = recheckDelay
+			recheckDelay = min(recheckDelay*2, time.Hour)
 		} else if c.state(err) {
 			return false
 		}
@@ -271,7 +279,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 			}
 			if profileErr := c.verify(ctx, api, avatars); errors.Is(profileErr, errDotUnavailable) || errors.Is(profileErr, errDotMissing) {
 				c.state(profileErr)
-				return true
+				return !errors.Is(profileErr, errDotReplaced)
 			} else if profileErr != nil {
 				c.login.Log.Warn().Err(profileErr).Msg("Could not refresh ChatGPT profiles")
 			}
@@ -400,7 +408,7 @@ func (c *Client) checkDotReplaced(ctx context.Context, api *chatgpt.Client, stat
 		Bool("primary_dot_unknown", discoverErr != nil && !missing).
 		Msg("The linked Dot room returned HTTP 404")
 	if replaced {
-		return fmt.Errorf("%w: %w", errDotUnavailable, err)
+		return fmt.Errorf("%w: %w: %w", errDotUnavailable, errDotReplaced, err)
 	} else if missing {
 		return fmt.Errorf("%w: %w", errDotMissing, err)
 	}
