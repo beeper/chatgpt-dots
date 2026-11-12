@@ -99,6 +99,25 @@ func (c *Client) Disconnect() {
 	c.mu.Unlock()
 }
 func (c *Client) IsLoggedIn() bool { return !c.loggedOut.Load() }
+func (c *Client) waitForConnect(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, c.connector.bridge.Config.SendReconnectWait)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		c.mu.RLock()
+		api, run := c.api, c.runContext
+		c.mu.RUnlock()
+		if api != nil || (run != nil && run.Err() != nil) || !c.IsLoggedIn() {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
 func (c *Client) LogoutRemote(context.Context) {
 	c.connector.loginMu.Lock()
 	defer c.connector.loginMu.Unlock()
@@ -1202,6 +1221,7 @@ func (c *Client) clearPending(ctx context.Context, requestID string) error {
 	return nil
 }
 func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
+	c.waitForConnect(ctx)
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	media := msg.Content.MsgType == event.MsgImage || msg.Content.MsgType == event.MsgFile || msg.Content.MsgType == event.MsgVideo || msg.Content.MsgType == event.MsgAudio

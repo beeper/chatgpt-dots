@@ -103,6 +103,7 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	if !ok {
 		return "", false, errors.New("This is not a ChatGPT Dots conversation")
 	}
+	client.waitForConnect(ce.Ctx)
 	client.sendMu.Lock()
 	defer client.sendMu.Unlock()
 	client.mu.RLock()

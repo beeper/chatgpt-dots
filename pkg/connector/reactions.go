@@ -59,6 +59,7 @@ func (c *Client) reactionClient(ctx context.Context, portal *bridgev2.Portal, ro
 }
 
 func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (*database.Reaction, error) {
+	c.waitForConnect(ctx)
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	pre, err := c.PreHandleMatrixReaction(ctx, msg)
@@ -81,6 +82,7 @@ func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixR
 }
 
 func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.MatrixReactionRemove) error {
+	c.waitForConnect(ctx)
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	target := msg.TargetReaction
