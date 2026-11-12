@@ -271,7 +271,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 	pollNow := true
 	for ctx.Err() == nil {
 		var err error
-		if pollNow || c.mediaRetryDue() {
+		if pollNow || c.mediaRetryDue() || !time.Now().Before(c.uncertainSendDeadline()) {
 			pollNow = false
 			err = c.poll(ctx, api)
 		}
@@ -343,7 +343,31 @@ func (c *Client) mediaRetryDue() bool {
 	}
 	return false
 }
+func (c *Client) uncertainSendDeadline() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var deadline time.Time
+	for _, pending := range c.meta.Pending {
+		if pending.KnownUnsent {
+			continue
+		}
+		attempted := pending.Attempted
+		if attempted.IsZero() {
+			attempted = time.UnixMilli(pending.Timestamp)
+		}
+		if due := attempted.Add(uncertainSendWindow); deadline.IsZero() || due.Before(deadline) {
+			deadline = due
+		}
+	}
+	if deadline.IsZero() {
+		return time.Now().Add(avatarRefreshInterval)
+	}
+	return deadline
+}
 func (c *Client) nextWake(next time.Time) time.Time {
+	if deadline := c.uncertainSendDeadline(); deadline.Before(next) {
+		next = deadline
+	}
 	for _, watch := range c.threadMessages {
 		if _, pending := watch.Room.Media[watch.Message.ID]; !pending && watch.NextRefresh.Before(next) {
 			next = watch.NextRefresh
