@@ -204,6 +204,21 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return c.doAt(ctx, "https://chatgpt.com/backend-api", method, path, body, out)
 }
 func (c *Client) doAt(ctx context.Context, origin, method, path string, body, out any) error {
+	err := c.attempt(ctx, origin, method, path, body, out)
+	var httpErr *HTTPError
+	if method != http.MethodGet || !errors.As(err, &httpErr) || httpErr.Status < http.StatusBadGateway || httpErr.Status > http.StatusGatewayTimeout {
+		return err
+	}
+	timer := time.NewTimer(unavailableReadRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return err
+	case <-timer.C:
+	}
+	return c.attempt(ctx, origin, method, path, body, out)
+}
+func (c *Client) attempt(ctx context.Context, origin, method, path string, body, out any) error {
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
 	if time.Until(c.Identity.Expires) < 5*time.Minute {
@@ -281,8 +296,9 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 }
 
 const (
-	maxResponseBytes         = 4 << 20
-	maxStreamedResponseBytes = 64 << 20
+	maxResponseBytes          = 4 << 20
+	maxStreamedResponseBytes  = 64 << 20
+	unavailableReadRetryDelay = time.Second
 )
 
 type SchemaError struct {

@@ -32,6 +32,7 @@ const (
 	avatarRefreshInterval = 30 * time.Minute
 	dotRecheckInterval    = 5 * time.Minute
 	uncertainSendWindow   = 2 * time.Minute
+	maxMessageAttempts    = 3
 )
 
 type Client struct {
@@ -47,6 +48,7 @@ type Client struct {
 	cancel         context.CancelFunc
 	done           chan struct{}
 	loggedOut      atomic.Bool
+	proxy          atomic.Pointer[proxyTransport]
 	threadMessages map[string]*threadMessage
 	signalWake     chan struct{}
 	signalsLive    atomic.Bool
@@ -54,6 +56,8 @@ type Client struct {
 	receipts       map[string]*receiptState
 	delivered      map[string][32]byte
 	deliveredOrder []string
+	failures       map[string]int
+	rescanAfter    map[string]string
 }
 
 func (c *Client) Connect(ctx context.Context) {
@@ -119,8 +123,12 @@ func (c *Client) sendState(state status.BridgeState) {
 	c.login.BridgeState.Send(state)
 }
 func (c *Client) state(err error) bool {
+	return c.stateVia(err, c.proxy.Load().host())
+}
+func (c *Client) stateVia(err error, proxyHost string) bool {
 	state := status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: stateSyncFailed, Info: map[string]any{"go_error": err.Error()}}
 	var httpErr *chatgpt.HTTPError
+	var schemaErr *chatgpt.SchemaError
 	if errors.Is(err, errDotUnavailable) {
 		state = badCredentialsState(stateDotUnavailable, err)
 	} else if errors.Is(err, errDotMissing) {
@@ -130,6 +138,8 @@ func (c *Client) state(err error) bool {
 			Int("status", httpErr.Status).
 			Str("path", httpErr.Path).
 			Bool("cloudflare_challenge", httpErr.Challenge).
+			Str("detail", httpErr.Body).
+			Str("proxy_host", proxyHost).
 			Msg("ChatGPT request failed")
 		switch {
 		case httpErr.Status == http.StatusUnauthorized:
@@ -145,6 +155,18 @@ func (c *Client) state(err error) bool {
 		default:
 			state.Error = stateRequestFailed
 		}
+	} else if errors.As(err, &schemaErr) {
+		c.login.Log.Warn().Err(err).
+			Str("path", schemaErr.Path).
+			Int("status", schemaErr.Status).
+			Int64("content_length", schemaErr.ContentLength).
+			Int64("bytes_read", schemaErr.BytesRead).
+			Bool("truncated", schemaErr.Truncated).
+			Str("decode_error", schemaErr.Cause).
+			Str("decode_field", schemaErr.Field).
+			Int64("decode_offset", schemaErr.Offset).
+			Str("proxy_host", proxyHost).
+			Msg("ChatGPT request failed")
 	} else if isTransportError(err) {
 		state.Error = stateNetworkError
 	}
@@ -157,6 +179,8 @@ func (c *Client) run(ctx context.Context) {
 	c.receipts = make(map[string]*receiptState)
 	c.delivered = make(map[string][32]byte)
 	c.deliveredOrder = nil
+	c.failures = make(map[string]int)
+	c.rescanAfter = make(map[string]string)
 	for _, watch := range c.threadMessages {
 		watch.NextRefresh = time.Time{}
 	}
@@ -170,6 +194,7 @@ func (c *Client) run(ctx context.Context) {
 		return
 	}
 	proxy := &proxyTransport{connector: c.connector, log: c.login.Log}
+	c.proxy.Store(proxy)
 	api, err := chatgpt.New(creds, proxy)
 	if err != nil {
 		c.sendState(badCredentialsState(stateBadCredentials, err))
@@ -194,6 +219,10 @@ func (c *Client) run(ctx context.Context) {
 }
 func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *proxyTransport, recheck bool) bool {
 	delay := time.Second * 3
+	recheckDelay := dotRecheckInterval
+	if recheck {
+		recheckDelay *= 2
+	}
 	for ctx.Err() == nil {
 		err := proxy.update(ctx, "connect")
 		if err == nil {
@@ -206,10 +235,14 @@ func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *pro
 		if errors.Is(err, errDotMissing) && recheck {
 			err = fmt.Errorf("%w: %w", errDotUnavailable, err)
 		}
-		if errors.Is(err, errDotUnavailable) || errors.Is(err, errDotMissing) {
+		if errors.Is(err, errDotReplaced) {
+			c.state(err)
+			return false
+		} else if errors.Is(err, errDotUnavailable) || errors.Is(err, errDotMissing) {
 			c.state(err)
 			recheck = true
-			next = dotRecheckInterval
+			next = recheckDelay
+			recheckDelay = min(recheckDelay*2, time.Hour)
 		} else if c.state(err) {
 			return false
 		}
@@ -252,7 +285,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 			}
 			if profileErr := c.verify(ctx, api, avatars); errors.Is(profileErr, errDotUnavailable) || errors.Is(profileErr, errDotMissing) {
 				c.state(profileErr)
-				return true
+				return !errors.Is(profileErr, errDotReplaced)
 			} else if profileErr != nil {
 				c.login.Log.Warn().Err(profileErr).Msg("Could not refresh ChatGPT profiles")
 			}
@@ -261,6 +294,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 		if ctx.Err() != nil {
 			return false
 		}
+		proxyHost := proxy.host()
 		if proxy.failed.Load() {
 			if proxyErr := proxy.update(ctx, "connect"); proxyErr != nil {
 				c.login.Log.Warn().Err(proxyErr).Msg("Could not refresh ChatGPT proxy")
@@ -271,7 +305,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 			if ctx.Err() != nil {
 				return false
 			}
-			if c.state(err) {
+			if c.stateVia(err, proxyHost) {
 				return false
 			}
 			delay = min(delay*2, time.Minute)
@@ -339,28 +373,32 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) 
 			}
 		}
 		c.mu.Unlock()
-		ghost, err := c.connector.bridge.GetGhostByID(ctx, c.GetUserID())
-		if err != nil {
-			return err
+		for _, userID := range []networkid.UserID{c.GetUserID(), c.dotID(state)} {
+			ghost, err := c.connector.bridge.GetGhostByID(ctx, userID)
+			if err != nil {
+				return err
+			}
+			info, err := c.GetUserInfo(ctx, ghost)
+			if err != nil {
+				return err
+			}
+			ghost.UpdateInfo(ctx, info)
 		}
-		selfInfo, err := c.GetUserInfo(ctx, ghost)
-		if err != nil {
-			return err
-		}
-		ghost.UpdateInfo(ctx, selfInfo)
 		portal, err := c.connector.bridge.GetPortalByKey(ctx, c.key(state))
 		if err != nil {
 			return err
 		}
+		info := c.chatInfo(state)
 		if portal.MXID == "" {
-			if err = portal.CreateMatrixRoom(ctx, c.login, c.chatInfo(state)); err != nil {
+			if err = portal.CreateMatrixRoom(ctx, c.login, info); err != nil {
 				return err
 			}
 			clear(c.delivered)
 			c.deliveredOrder = nil
 			c.rescan.Store(true)
 		} else {
-			portal.UpdateInfo(ctx, c.chatInfo(state), c.login, nil, time.Time{})
+			info.Members = nil
+			portal.UpdateInfo(ctx, info, nil, nil, time.Time{})
 		}
 	}
 	return nil
@@ -380,7 +418,7 @@ func (c *Client) checkDotReplaced(ctx context.Context, api *chatgpt.Client, stat
 		Bool("primary_dot_unknown", discoverErr != nil && !missing).
 		Msg("The linked Dot room returned HTTP 404")
 	if replaced {
-		return fmt.Errorf("%w: %w", errDotUnavailable, err)
+		return fmt.Errorf("%w: %w: %w", errDotUnavailable, errDotReplaced, err)
 	} else if missing {
 		return fmt.Errorf("%w: %w", errDotMissing, err)
 	}
@@ -476,8 +514,26 @@ func (c *Client) GetUserInfo(_ context.Context, g *bridgev2.Ghost) (*bridgev2.Us
 	}
 	return nil, errors.New("unknown Dot contact")
 }
+func (c *Client) HandleMatrixMembership(_ context.Context, msg *bridgev2.MatrixMembershipChange) (*bridgev2.MatrixMembershipResult, error) {
+	if msg.Type == bridgev2.Invite {
+		return nil, errors.New("cannot invite additional users to a Dot chat")
+	}
+	return nil, nil
+}
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
-	return &event.RoomFeatures{ID: "chatgpt-dots.replies-reactions.v1", ReadReceipts: true, TypingNotifications: true, ReactionCount: 1, File: event.FileFeatureMap{
+	return &event.RoomFeatures{ID: "chatgpt-dots.formatting.v1", ReadReceipts: true, TypingNotifications: true, ReactionCount: 1, Formatting: event.FormattingFeatureMap{
+		event.FmtBold:          event.CapLevelFullySupported,
+		event.FmtItalic:        event.CapLevelFullySupported,
+		event.FmtStrikethrough: event.CapLevelFullySupported,
+		event.FmtInlineCode:    event.CapLevelFullySupported,
+		event.FmtCodeBlock:     event.CapLevelFullySupported,
+		event.FmtBlockquote:    event.CapLevelFullySupported,
+		event.FmtInlineLink:    event.CapLevelFullySupported,
+		event.FmtUnorderedList: event.CapLevelFullySupported,
+		event.FmtOrderedList:   event.CapLevelFullySupported,
+		event.FmtListStart:     event.CapLevelFullySupported,
+		event.FmtHeaders:       event.CapLevelPartialSupport,
+	}, File: event.FileFeatureMap{
 		"m.image":         {MimeTypes: map[string]event.CapabilitySupportLevel{"image/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.file":          {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.audio":         {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
@@ -538,7 +594,11 @@ func (c *Client) advanceCursor(ctx context.Context, state *RoomState, id string)
 	return nil
 }
 func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
-	full := c.rescan.Swap(false) || c.meta.Rescan || !c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion
+	full := c.rescan.Swap(false)
+	if full {
+		clear(c.rescanAfter)
+	}
+	full = full || c.meta.Rescan || !c.meta.ConfirmationsSynced || c.meta.ConfirmationVersion != confirmationRenderingVersion
 	if full {
 		if !c.meta.Rescan {
 			c.mu.Lock()
@@ -553,11 +613,6 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 				return err
 			}
 		}
-		defer func() {
-			if err != nil && !onlyMediaRetries(err) {
-				c.rescan.Store(true)
-			}
-		}()
 	}
 	var pending error
 	for _, state := range c.meta.Rooms {
@@ -609,6 +664,9 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 		}
 		if full {
 			after = state.Baseline
+			if resume := c.rescanAfter[state.Profile.Room]; resume != "" {
+				after = resume
+			}
 		}
 		c.mu.RLock()
 		var pendingIDs []string
@@ -647,7 +705,8 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			sort.SliceStable(page.Items, func(i, j int) bool { return page.Items[i].Created.Before(page.Items[j].Created) })
 			for _, m := range page.Items {
 				if m.ID == "" || m.Created.IsZero() {
-					return errors.New("provider message missing stable identity or timestamp")
+					c.login.Log.Error().Str("message_id", m.ID).Msg("Skipping ChatGPT message without a stable identity or timestamp")
+					continue
 				}
 				if m.ID == state.Baseline || m.Created.Before(state.Linked) {
 					continue
@@ -693,9 +752,15 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			if next == after {
 				return errors.New("provider pagination did not advance")
 			}
+			if full {
+				c.rescanAfter[state.Profile.Room] = next
+			}
 			after = next
 		}
 		if err := c.sendReceipt(ctx, state, receipt); err != nil {
+			return err
+		}
+		if err := c.sendHumanReceipt(ctx, state, receipt); err != nil {
 			return err
 		}
 	}
@@ -714,6 +779,7 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 		if err != nil {
 			return err
 		}
+		clear(c.rescanAfter)
 	}
 	return pending
 }
@@ -764,12 +830,31 @@ func (c *Client) deliverMedia(ctx context.Context, state *RoomState, m chatgpt.M
 	if err == nil {
 		err = c.syncReactions(ctx, state, m)
 	}
+	if err != nil && !onlyMediaRetries(err) && c.giveUp(ctx, m, err) {
+		err = nil
+	}
+	if err == nil {
+		delete(c.failures, m.ID)
+	}
 	if err == nil || onlyMediaRetries(err) {
 		if saveErr := c.saveMediaRetry(ctx, state, m.ID, after, rev, err != nil); saveErr != nil {
 			return saveErr
 		}
 	}
 	return err
+}
+func (c *Client) giveUp(ctx context.Context, m chatgpt.Message, err error) bool {
+	var httpErr *chatgpt.HTTPError
+	if !errors.As(err, &messageError{}) || ctx.Err() != nil || isTransportError(err) || errors.As(err, &httpErr) && !isMessageRejection(httpErr) {
+		return false
+	}
+	c.failures[m.ID]++
+	if c.failures[m.ID] < maxMessageAttempts {
+		return false
+	}
+	c.login.Log.Err(err).Str("message_id", m.ID).Int("attempts", c.failures[m.ID]).Msg("Skipping ChatGPT message that keeps failing to bridge")
+	delete(c.failures, m.ID)
+	return true
 }
 func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Message) error {
 	if m.ID == state.Baseline || m.Created.Before(state.Linked) {
@@ -781,7 +866,7 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	} else if m.Sender == state.HumanMember {
 		sender = bridgev2.EventSender{Sender: c.GetUserID(), SenderLogin: c.login.ID, IsFromMe: true}
 	} else {
-		return errors.New("message from an unverified Dot room member")
+		return messageError{errors.New("message from an unverified Dot room member")}
 	}
 	existing, err := c.connector.bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(m.ID))
 	if err != nil {
@@ -813,12 +898,15 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 			return
 		}
 		original := &bridgev2.MatrixMessage{MatrixEventBase: bridgev2.MatrixEventBase[*event.MessageEventContent]{Portal: p, Event: &event.Event{ID: pending.EventID, RoomID: p.MXID, Sender: pending.Sender, Timestamp: pending.Timestamp, Type: event.EventMessage}}}
-		original.AddPendingToSave(&database.Message{SenderID: c.GetUserID(), Metadata: &MessageMetadata{Revision: revision(m), OutgoingMedia: pending.Media}}, networkid.TransactionID(m.RequestID), nil)
+		original.AddPendingToSave(&database.Message{SenderID: c.GetUserID(), Metadata: &MessageMetadata{Revision: textRevision(m, revision(m)), OutgoingMedia: pending.Media}}, networkid.TransactionID(m.RequestID), nil)
 	}
 	var conversionErr error
 	msg.ConvertMessageFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, _ chatgpt.Message) (*bridgev2.ConvertedMessage, error) {
 		converted, err := c.convertIncoming(ctx, state, p, intent, m, nil)
 		conversionErr = err
+		if err != nil && c.failures[m.ID]+1 < maxMessageAttempts {
+			return nil, fmt.Errorf("%w: %w", bridgev2.ErrIgnoringRemoteEvent, err)
+		}
 		if err == nil {
 			for _, part := range converted.Parts {
 				cutOffLongText(c.login.Log, part.Content, maxMatrixContentBytes)
@@ -829,7 +917,9 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	msg.ConvertEditFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
 		converted, err := c.convertIncoming(ctx, state, p, intent, m, existing)
 		conversionErr = err
-		if err != nil {
+		if err != nil && c.failures[m.ID]+1 < maxMessageAttempts {
+			return nil, fmt.Errorf("%w: %w", bridgev2.ErrIgnoringRemoteEvent, err)
+		} else if err != nil {
 			return nil, err
 		}
 		addedParts := *converted
@@ -906,8 +996,10 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		var storage *chatgpt.AttachmentStorageError
 		if errors.As(conversionErr, &storage) {
 			return mediaRetryError{storage}
+		} else if conversionErr != nil {
+			return messageError{conversionErr}
 		}
-		return conversionErr
+		return nil
 	}
 	result := c.login.QueueRemoteEvent(msg)
 	if !result.Success || result.Ignored {
@@ -1011,9 +1103,8 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 		return nil, relinkStatus(errors.New("dot room members changed; refusing send"), certain)
 	}
 	fingerprint := []byte(msg.Content.Body)
-	text := msg.Content.Body
+	text := matrixText(ctx, msg.Content, media)
 	if media {
-		text = msg.Content.GetCaption()
 		fingerprint, err = json.Marshal(msg.Content)
 		if err != nil {
 			return nil, errors.New("cannot fingerprint attachment content")
@@ -1139,7 +1230,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 }
 
 func (c *Client) sendResponse(m chatgpt.Message, media bool, generation context.Context) *bridgev2.MatrixMessageResponse {
-	return &bridgev2.MatrixMessageResponse{DB: &database.Message{ID: networkid.MessageID(m.ID), SenderID: c.GetUserID(), ThreadRoot: networkid.MessageID(m.ReplyRootMessageID), Timestamp: m.Created, Metadata: &MessageMetadata{Revision: revision(m), OutgoingMedia: media}}, PostSave: func(ctx context.Context, _ *database.Message) {
+	return &bridgev2.MatrixMessageResponse{DB: &database.Message{ID: networkid.MessageID(m.ID), SenderID: c.GetUserID(), ThreadRoot: networkid.MessageID(m.ReplyRootMessageID), Timestamp: m.Created, Metadata: &MessageMetadata{Revision: textRevision(m, revision(m)), OutgoingMedia: media}}, PostSave: func(ctx context.Context, _ *database.Message) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		// The framework calls PostSave after this client's handler has returned.
@@ -1222,3 +1313,4 @@ func (c *Client) findRequest(ctx context.Context, api *chatgpt.Client, state *Ro
 }
 
 var _ bridgev2.NetworkAPI = (*Client)(nil)
+var _ bridgev2.MembershipHandlingNetworkAPI = (*Client)(nil)

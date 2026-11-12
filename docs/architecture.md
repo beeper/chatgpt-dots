@@ -61,9 +61,11 @@ Full scans still refresh it to recover later resumes.
 
 The native WebSocket supplies typing heartbeats and triggers reconciliation for
 verified Dot rooms. Typing expires rather than being replayed after reconnect.
-Read receipts use the Dot's native read cursor and timestamp, not inferred
-activity. Reaction snapshots reconcile independently of message content.
-Typing and read receipts are incoming-only. Both participants' reactions are
+Read receipts use the native read cursors and timestamps, not inferred
+activity. Reading the chat in Beeper moves your ChatGPT read cursor to the
+newest message read, and reading it in ChatGPT marks the same message read in
+Beeper. Reaction snapshots reconcile independently of message content.
+Typing is incoming-only. Both participants' reactions are
 synced, including the owner's reactions made in ChatGPT. The native protocol
 allows one emoji per participant per message: adding another replaces it, and
 removing it uses the native reaction DELETE endpoint. Before removing a reaction,
@@ -84,8 +86,12 @@ binds the request definition to its persisted message in that account and room.
 Before submitting a decision the
 connector verifies the account, room members, original Dot sender, request
 definition and provider's current request fingerprint. Only confirmations
-with no form fields or one native confirmation checkbox can be
+with no form fields or one native confirmation checkbox, and Codex tool
+approvals (`_meta.codex_approval_kind` `mcp_tool_call` with no form fields), can be
 answered from Beeper; other requests link to the native ChatGPT interface.
+`!dots accept-conversation <code>` and `!dots accept-always <code>` accept a tool
+approval with `_meta.persist` `session` or `always`, only when the request lists
+that option.
 
 The login metadata reserves the decision before submission. Only a provider
 `applied` response is reported as confirmation. An ambiguous response remains
