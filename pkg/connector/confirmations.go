@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,7 +22,9 @@ type ConfirmationAction struct {
 	Applied bool       `json:"applied"`
 }
 
-const confirmationRenderingVersion = 2
+const confirmationRenderingVersion = 3
+
+var confirmationPersistence = map[string]string{"accept-conversation": "session", "accept-always": "always"}
 
 func confirmationText(m chatgpt.Message, prefix string) string {
 	e := m.Content.Elicitation
@@ -45,6 +48,16 @@ func confirmationText(m chatgpt.Message, prefix string) string {
 		return text + "This request needs the ChatGPT interface: https://chatgpt.com/dots/home"
 	}
 	code := e.Definition()[:12]
+	if persist, ok := e.ToolApproval(); ok {
+		text += fmt.Sprintf("To allow once, send `%s accept %s` in this chat.", prefix, code)
+		if slices.Contains(persist, "session") {
+			text += fmt.Sprintf(" To allow this tool for this conversation, send `%s accept-conversation %s`.", prefix, code)
+		}
+		if slices.Contains(persist, "always") {
+			text += fmt.Sprintf(" To always allow this tool, send `%s accept-always %s`.", prefix, code)
+		}
+		return text + fmt.Sprintf(" To deny, send `%s decline %s`. Check status with `%s check %s`. You do not need to reply to this message.", prefix, code, prefix, code)
+	}
 	return text + fmt.Sprintf("To accept, send `%s accept %s` in this chat. To decline, send `%s decline %s`. Check status with `%s check %s`. You do not need to reply to this message.", prefix, code, prefix, code, prefix, code)
 }
 
@@ -53,9 +66,15 @@ func (c *Connector) registerConfirmationCommands() error {
 	if !ok {
 		return errors.New("Dot confirmations require the standard bridge command processor")
 	}
-	for _, name := range []string{"accept", "decline", "check"} {
+	for name, description := range map[string]string{
+		"accept":              "accept it",
+		"accept-conversation": "allow its tool for the rest of the ChatGPT conversation",
+		"accept-always":       "always allow its tool",
+		"decline":             "decline it",
+		"check":               "check its status",
+	} {
 		processor.AddHandlers(&commands.FullHandler{Name: name, RequiresPortal: true, RequiresLogin: true,
-			Help: commands.HelpMeta{Section: commands.HelpSectionMisc, Args: "<confirmation code>", Description: "Use the code on a Dot confirmation to " + name + " it."}, Func: c.handleConfirmationCommand})
+			Help: commands.HelpMeta{Section: commands.HelpSectionMisc, Args: "<confirmation code>", Description: "Use the code on a Dot confirmation to " + description + "."}, Func: c.handleConfirmationCommand})
 	}
 	return nil
 }
@@ -109,7 +128,7 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	if err != nil {
 		return "", false, err
 	}
-	current, err := roomState(api, room.Profile, verified)
+	current, err := roomMembers(api, room.Profile, verified)
 	if err != nil || current.DotMember != room.DotMember || current.HumanMember != room.HumanMember {
 		return "", false, errors.New("The Dot room identity changed; refusing confirmation")
 	}
@@ -133,8 +152,13 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 		}
 		return "ChatGPT reports this confirmation as " + observed.Runtime + ".", false, nil
 	}
-	if ce.Command != "accept" && ce.Command != "decline" {
+	persist, remembered := confirmationPersistence[ce.Command]
+	if ce.Command != "accept" && ce.Command != "decline" && !remembered {
 		return "", false, errors.New("Unknown confirmation command")
+	}
+	action := ce.Command
+	if remembered {
+		action = "accept"
 	}
 	if reserved {
 		if previous.Action == ce.Command && previous.Applied {
@@ -144,6 +168,9 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	}
 	if !observed.Elicitation.Binary() {
 		return "", false, errors.New("This request needs the ChatGPT interface: https://chatgpt.com/dots/home")
+	}
+	if offered, _ := observed.Elicitation.ToolApproval(); remembered && !slices.Contains(offered, persist) {
+		return "", false, errors.New("This confirmation does not offer that option; use a command shown on the card")
 	}
 	if !observed.CanRespond || observed.Runtime != "pending" || observed.Elicitation.Status != "" && observed.Elicitation.Status != "pending" {
 		return "", false, errors.New("This confirmation is no longer waiting for a response; check it in ChatGPT")
@@ -167,7 +194,7 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	if err != nil {
 		return "", false, errors.New("Could not save the confirmation decision; nothing submitted")
 	}
-	applied, err := api.RespondElicitation(ctx, room.Profile.Room, string(target.ID), observed.Fingerprint, ce.Command, observed.Elicitation)
+	applied, err := api.RespondElicitation(ctx, room.Profile.Room, string(target.ID), observed.Fingerprint, action, persist, observed.Elicitation)
 	if err != nil || !applied {
 		return "", true, errors.New("ChatGPT did not confirm this decision")
 	}
@@ -183,11 +210,7 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	if err != nil {
 		return "", true, errors.New("Could not save ChatGPT's confirmation acknowledgement")
 	}
-	client.rescan.Store(true)
-	select {
-	case client.signalWake <- struct{}{}:
-	default:
-	}
+	client.requestRefresh(room.Profile.Room, string(target.ID), true)
 	return "ChatGPT confirmed this decision: " + ce.Command + ".", false, nil
 }
 
