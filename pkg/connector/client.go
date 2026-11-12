@@ -602,7 +602,7 @@ func (c *Client) HandleMatrixMembership(_ context.Context, msg *bridgev2.MatrixM
 	return nil, nil
 }
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
-	return &event.RoomFeatures{ID: "chatgpt-dots.incoming-typing.v1", ReadReceipts: true, ReactionCount: 1, Formatting: event.FormattingFeatureMap{
+	return &event.RoomFeatures{ID: "chatgpt-dots.audio-files.v1", ReadReceipts: true, ReactionCount: 1, Formatting: event.FormattingFeatureMap{
 		event.FmtBold:          event.CapLevelFullySupported,
 		event.FmtItalic:        event.CapLevelFullySupported,
 		event.FmtStrikethrough: event.CapLevelFullySupported,
@@ -617,7 +617,7 @@ func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomF
 	}, File: event.FileFeatureMap{
 		"m.image":         {MimeTypes: map[string]event.CapabilitySupportLevel{"image/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.file":          {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
-		"m.audio":         {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
+		"m.audio":         {MimeTypes: map[string]event.CapabilitySupportLevel{"audio/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.video":         {MimeTypes: map[string]event.CapabilitySupportLevel{"video/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		event.CapMsgVoice: {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
 	}, Reply: event.CapLevelFullySupported, Thread: event.CapLevelFullySupported, Edit: event.CapLevelRejected, Delete: event.CapLevelRejected, Reaction: event.CapLevelFullySupported, Poll: event.CapLevelRejected, LocationMessage: event.CapLevelRejected}
@@ -1202,7 +1202,7 @@ func (c *Client) clearPending(ctx context.Context, requestID string) error {
 func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
-	media := msg.Content.MsgType == event.MsgImage || msg.Content.MsgType == event.MsgFile || msg.Content.MsgType == event.MsgVideo
+	media := msg.Content.MsgType == event.MsgImage || msg.Content.MsgType == event.MsgFile || msg.Content.MsgType == event.MsgVideo || msg.Content.MsgType == event.MsgAudio
 	if !media && (msg.Content.MsgType != event.MsgText || msg.Content.Body == "") {
 		return nil, bridgev2.ErrUnsupportedMessageType
 	}

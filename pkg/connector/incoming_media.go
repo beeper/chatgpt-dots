@@ -380,6 +380,8 @@ func incomingFile(ctx context.Context, api *chatgpt.Client, state *RoomState, po
 		content.MsgType = event.MsgImage
 	} else if strings.HasPrefix(mimeType, "video/") {
 		content.MsgType = event.MsgVideo
+	} else if strings.HasPrefix(mimeType, "audio/") {
+		content.MsgType = event.MsgAudio
 	}
 	content.URL, content.File, err = intent.UploadMedia(ctx, portal.MXID, file.Data, name, mimeType)
 	if ctx.Err() != nil {
