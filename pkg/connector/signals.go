@@ -72,7 +72,6 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 		err := api.StreamSignals(ctx, func(signal chatgpt.Signal) error {
 			if signal.Type == "resync" {
 				clear()
-				c.signalsLive.Store(true)
 				c.recheck.Store(true)
 				c.requestSync(false)
 				return nil
@@ -114,7 +113,6 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 			}
 			return nil
 		})
-		c.signalsLive.Store(false)
 		c.recheck.Store(true)
 		c.requestSync(false)
 		clear()
@@ -155,7 +153,7 @@ func (c *Client) sendTyping(ctx context.Context, state *RoomState, timeout time.
 func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *RoomState) (*receiptState, error) {
 	room, err := api.RoomSignals(ctx, state.Profile)
 	if err != nil {
-		return nil, err
+		return nil, c.checkDotReplaced(ctx, api, state, err)
 	}
 	dot, human := false, false
 	for _, member := range room.Members {

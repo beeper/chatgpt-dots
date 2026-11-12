@@ -28,7 +28,6 @@ import (
 
 const (
 	pollInterval          = 3 * time.Second
-	livePollInterval      = 30 * time.Second
 	avatarRefreshInterval = 30 * time.Minute
 	dotRecheckInterval    = 5 * time.Minute
 	uncertainSendWindow   = 2 * time.Minute
@@ -51,7 +50,6 @@ type Client struct {
 	proxy          atomic.Pointer[proxyTransport]
 	threadMessages map[string]*threadMessage
 	signalWake     chan struct{}
-	signalsLive    atomic.Bool
 	rescan         atomic.Bool
 	recheck        atomic.Bool
 	refreshMu      sync.Mutex
@@ -230,7 +228,7 @@ func (c *Client) connectDot(ctx context.Context, api *chatgpt.Client, proxy *pro
 	for ctx.Err() == nil {
 		err := proxy.update(ctx, "connect")
 		if err == nil {
-			err = c.verify(ctx, api, true)
+			err = c.verify(ctx, api)
 		}
 		if err == nil {
 			return true
@@ -269,31 +267,26 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 	}()
 	defer func() { stopStream(); <-streamDone }()
 	delay := pollInterval
-	nextProfileRefresh := time.Now().Add(time.Minute)
 	nextAvatarRefresh := time.Now().Add(avatarRefreshInterval)
-	var nextPoll time.Time
+	pollNow := true
 	for ctx.Err() == nil {
 		var err error
-		if !time.Now().Before(nextPoll) {
+		if pollNow || c.mediaRetryDue() || !time.Now().Before(c.uncertainSendDeadline()) {
+			pollNow = false
 			err = c.poll(ctx, api)
-			nextPoll = time.Now().Add(pollInterval)
-			if c.signalsLive.Load() {
-				nextPoll = time.Now().Add(livePollInterval)
-			}
 		}
 		err = errors.Join(err, c.refreshThreads(ctx, api))
-		if !time.Now().Before(nextProfileRefresh) {
-			avatars := !time.Now().Before(nextAvatarRefresh)
-			if avatars {
-				nextAvatarRefresh = time.Now().Add(avatarRefreshInterval)
-			}
-			if profileErr := c.verify(ctx, api, avatars); errors.Is(profileErr, errDotUnavailable) || errors.Is(profileErr, errDotMissing) {
-				c.state(profileErr)
-				return !errors.Is(profileErr, errDotReplaced)
+		if !time.Now().Before(nextAvatarRefresh) {
+			nextAvatarRefresh = time.Now().Add(avatarRefreshInterval)
+			if profileErr := c.verify(ctx, api); errors.Is(profileErr, errDotUnavailable) || errors.Is(profileErr, errDotMissing) {
+				err = errors.Join(err, profileErr)
 			} else if profileErr != nil {
 				c.login.Log.Warn().Err(profileErr).Msg("Could not refresh ChatGPT profiles")
 			}
-			nextProfileRefresh = time.Now().Add(time.Minute)
+		}
+		if errors.Is(err, errDotUnavailable) || errors.Is(err, errDotMissing) {
+			c.state(err)
+			return !errors.Is(err, errDotReplaced)
 		}
 		if ctx.Err() != nil {
 			return false
@@ -305,6 +298,7 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 				err = errors.Join(err, proxyErr)
 			}
 		}
+		wake := c.nextWake(nextAvatarRefresh)
 		if err != nil && !onlyMediaRetries(err) {
 			if ctx.Err() != nil {
 				return false
@@ -313,26 +307,85 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 				return false
 			}
 			delay = min(delay*2, time.Minute)
-			nextPoll = time.Time{}
+			pollNow = true
+			wake = time.Now().Add(delay)
 		} else {
 			if err != nil {
 				c.login.Log.Debug().Err(err).Msg("Waiting to retry a ChatGPT attachment download")
 			}
-			c.sendState(status.BridgeState{StateEvent: status.StateConnected})
+			if c.login.BridgeState.GetPrevUnsent().StateEvent != status.StateConnected {
+				c.sendState(status.BridgeState{StateEvent: status.StateConnected})
+			}
 			delay = pollInterval
 		}
-		timer := time.NewTimer(delay)
+		timer := time.NewTimer(time.Until(wake))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return false
 		case <-c.signalWake:
 			timer.Stop()
-			nextPoll = time.Time{}
+			pollNow = true
 		case <-timer.C:
 		}
 	}
 	return false
+}
+func (c *Client) mediaRetryDue() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, state := range c.meta.Rooms {
+		for _, retry := range state.Media {
+			if !time.Now().Before(retry.Next) {
+				return true
+			}
+		}
+	}
+	return false
+}
+func (c *Client) uncertainSendDeadline() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var deadline time.Time
+	for _, pending := range c.meta.Pending {
+		if pending.KnownUnsent {
+			continue
+		}
+		attempted := pending.Attempted
+		if attempted.IsZero() {
+			attempted = time.UnixMilli(pending.Timestamp)
+		}
+		if due := attempted.Add(uncertainSendWindow); deadline.IsZero() || due.Before(deadline) {
+			deadline = due
+		}
+	}
+	if deadline.IsZero() {
+		return time.Now().Add(avatarRefreshInterval)
+	}
+	return deadline
+}
+func (c *Client) nextWake(next time.Time) time.Time {
+	if deadline := c.uncertainSendDeadline(); deadline.Before(next) {
+		next = deadline
+	}
+	for _, watch := range c.threadMessages {
+		if _, pending := watch.Room.Media[watch.Message.ID]; !pending && watch.NextRefresh.Before(next) {
+			next = watch.NextRefresh
+		}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, state := range c.meta.Rooms {
+		for _, retry := range state.Media {
+			if retry.Next.Before(next) {
+				next = retry.Next
+			}
+		}
+	}
+	if earliest := time.Now().Add(pollInterval); next.Before(earliest) {
+		next = earliest
+	}
+	return next
 }
 func wait(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
@@ -344,37 +397,31 @@ func wait(ctx context.Context, d time.Duration) bool {
 		return true
 	}
 }
-func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) error {
+func (c *Client) verify(ctx context.Context, api *chatgpt.Client) error {
 	for _, state := range c.meta.Rooms {
 		r, err := api.Verify(ctx, state.Profile)
 		if err != nil {
 			return c.checkDotReplaced(ctx, api, state, err)
 		}
-		current, err := roomState(api, state.Profile, r)
+		current, err := roomMembers(api, state.Profile, r)
 		if err != nil {
 			return err
 		}
 		if current.DotMember != state.DotMember || current.HumanMember != state.HumanMember {
 			return errors.New("Dot room members changed; refusing to change existing identity mappings")
 		}
-		if avatars {
-			c.refreshSelfAvatar(ctx, api, state)
-			c.refreshDotAvatar(ctx, api, state)
-		}
+		c.refreshSelfAvatar(ctx, api, state)
+		c.refreshDotAvatar(ctx, api, state)
 		c.mu.Lock()
-		changed := avatars || state.HumanName != current.HumanName || c.login.RemoteProfile.Name != current.HumanName
 		state.HumanName = current.HumanName
 		c.login.RemoteProfile.Name = current.HumanName
 		if email := api.Identity.Email; email != "" {
-			changed = changed || c.login.RemoteName != email || c.login.RemoteProfile.Email != email
 			c.login.RemoteName = email
 			c.login.RemoteProfile.Email = email
 		}
-		if changed {
-			if err = c.login.Save(ctx); err != nil {
-				c.mu.Unlock()
-				return err
-			}
+		if err = c.login.Save(ctx); err != nil {
+			c.mu.Unlock()
+			return err
 		}
 		c.mu.Unlock()
 		for _, userID := range []networkid.UserID{c.GetUserID(), c.dotID(state)} {
@@ -399,7 +446,7 @@ func (c *Client) verify(ctx context.Context, api *chatgpt.Client, avatars bool) 
 			}
 			clear(c.delivered)
 			c.deliveredOrder = nil
-			c.rescan.Store(true)
+			c.requestSync(true)
 		} else {
 			info.Members = nil
 			portal.UpdateInfo(ctx, info, nil, nil, time.Time{})
@@ -943,7 +990,7 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		return err
 	}
 	if incomingStale(m, existing) {
-		return nil
+		return c.clearPending(ctx, m.RequestID)
 	}
 	c.prepareThreads(state, &m, existing)
 	var cleanup func() error
@@ -1101,17 +1148,18 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	if err = c.saveMessageMetadata(ctx, m, saved); err != nil {
 		return err
 	}
+	return c.clearPending(ctx, m.RequestID)
+}
+func (c *Client) clearPending(ctx context.Context, requestID string) error {
 	c.mu.Lock()
-	pending, exists := c.meta.Pending[m.RequestID]
-	if exists {
-		delete(c.meta.Pending, m.RequestID)
-		err = c.login.Save(ctx)
-		if err != nil {
-			c.meta.Pending[m.RequestID] = pending
-		}
+	defer c.mu.Unlock()
+	pending, exists := c.meta.Pending[requestID]
+	if !exists {
+		return nil
 	}
-	c.mu.Unlock()
-	if err != nil {
+	delete(c.meta.Pending, requestID)
+	if err := c.login.Save(ctx); err != nil {
+		c.meta.Pending[requestID] = pending
 		return err
 	}
 	return nil
@@ -1163,9 +1211,10 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	room, err := api.Verify(ctx, state.Profile)
 	if err != nil {
 		c.state(err)
+		c.requestSync(false)
 		return nil, wrapSendError(err, certain)
 	}
-	current, err := roomState(api, state.Profile, room)
+	current, err := roomMembers(api, state.Profile, room)
 	if err != nil {
 		return nil, relinkStatus(err, certain)
 	}
@@ -1278,6 +1327,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 		var httpErr *chatgpt.HTTPError
 		if errors.As(err, &httpErr) && (httpErr.Status == 401 || httpErr.Status == 403) {
 			c.state(err)
+			c.requestSync(false)
 		}
 		if certain {
 			c.mu.Lock()

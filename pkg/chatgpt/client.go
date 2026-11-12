@@ -449,19 +449,23 @@ func (c *Client) Verify(ctx context.Context, p Profile) (*Room, error) {
 	c.mu.Lock()
 	c.rooms[p.Room] = true
 	c.mu.Unlock()
-	if len(r.Latest) == 0 {
-		var baseline struct {
-			Items []struct {
-				ID      string    `json:"id"`
-				Created time.Time `json:"created_at"`
-			} `json:"items"`
-		}
-		if err := c.do(ctx, "GET", "/messaging/rooms/"+url.PathEscape(p.Room)+"/messages?limit=1", nil, &baseline); err != nil {
-			return nil, fmt.Errorf("reading the Dot message baseline: %w", err)
-		}
-		r.Latest = baseline.Items
-	}
 	return &r, nil
+}
+func (c *Client) LoadLatest(ctx context.Context, r *Room) error {
+	if len(r.Latest) > 0 {
+		return nil
+	}
+	var baseline struct {
+		Items []struct {
+			ID      string    `json:"id"`
+			Created time.Time `json:"created_at"`
+		} `json:"items"`
+	}
+	if err := c.do(ctx, "GET", "/messaging/rooms/"+url.PathEscape(r.ID)+"/messages?limit=1", nil, &baseline); err != nil {
+		return fmt.Errorf("reading the Dot message baseline: %w", err)
+	}
+	r.Latest = baseline.Items
+	return nil
 }
 func (c *Client) Messages(ctx context.Context, room, after string) (*Page, error) {
 	c.mu.RLock()
