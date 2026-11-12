@@ -45,11 +45,11 @@ func TestElicitationWireContract(t *testing.T) {
 				}
 				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"status":"applied"}`)), Request: r}, nil
 			})}
-			applied, err := c.RespondElicitation(context.Background(), "room", "message", "fresh", action, testElicitation())
+			applied, err := c.RespondElicitation(context.Background(), "room", "message", "fresh", action, "", testElicitation())
 			if err != nil || !applied || calls != 1 {
 				t.Fatalf("applied=%v err=%v calls=%d", applied, err, calls)
 			}
-			if _, err = c.RespondElicitation(context.Background(), "other", "message", "fresh", action, testElicitation()); err == nil || calls != 1 {
+			if _, err = c.RespondElicitation(context.Background(), "other", "message", "fresh", action, "", testElicitation()); err == nil || calls != 1 {
 				t.Fatal("unverified room reached provider")
 			}
 		})
@@ -67,7 +67,7 @@ func TestElicitationDoesNotRetryOrInferApplied(t *testing.T) {
 			calls++
 			return &http.Response{StatusCode: response.status, Body: io.NopCloser(strings.NewReader(response.body)), Request: r, Header: http.Header{}}, nil
 		})}
-		applied, _ := c.RespondElicitation(context.Background(), "room", "message", "fresh", "accept", testElicitation())
+		applied, _ := c.RespondElicitation(context.Background(), "room", "message", "fresh", "accept", "", testElicitation())
 		if applied || calls != 1 {
 			t.Fatalf("status=%d body=%s applied=%v calls=%d", response.status, response.body, applied, calls)
 		}
@@ -93,7 +93,7 @@ func TestBooleanConfirmationWireContract(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"status":"applied"}`)), Request: r}, nil
 	})}
-	if ok, err := c.RespondElicitation(context.Background(), "room", "message", "fresh", "accept", e); !ok || err != nil {
+	if ok, err := c.RespondElicitation(context.Background(), "room", "message", "fresh", "accept", "", e); !ok || err != nil {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
 	for _, meta := range []string{`{"openai/confirmation":{"version":2,"field":"confirmed"}}`, `{"openai/confirmation":{"version":1,"field":"different"}}`} {

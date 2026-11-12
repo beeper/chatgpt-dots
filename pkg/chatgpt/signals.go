@@ -25,6 +25,7 @@ type Signal struct {
 	Type    string `json:"type"`
 	Payload struct {
 		Room      string  `json:"room_id"`
+		MessageID string  `json:"message_id"`
 		Typing    *bool   `json:"typing"`
 		Timestamp float64 `json:"timestamp"`
 		Source    struct {
@@ -32,6 +33,7 @@ type Signal struct {
 			Member string `json:"account_user_id"`
 		} `json:"source"`
 		Message struct {
+			ID     string `json:"id"`
 			Member string `json:"account_user_id"`
 		} `json:"message"`
 		RoomInfo struct {
@@ -55,6 +57,18 @@ func (c *Client) RoomSignals(ctx context.Context, p Profile) (*Room, error) {
 		return nil, errors.New("Dot room signal identity changed")
 	}
 	return &room, nil
+}
+
+func (c *Client) MarkRead(ctx context.Context, room string, readAt time.Time) error {
+	c.mu.RLock()
+	verified := c.rooms[room]
+	c.mu.RUnlock()
+	if !verified {
+		return errors.New("refusing unverified Dot room")
+	}
+	return c.do(ctx, http.MethodPost, "/messaging/rooms/"+url.PathEscape(room)+"/read", struct {
+		ReadAt time.Time `json:"last_read_at"`
+	}{readAt.UTC()}, nil)
 }
 
 type StreamDisconnectedError struct {
@@ -129,9 +143,11 @@ func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) e
 		return fmt.Errorf("unexpected ChatGPT messaging socket origin %s://%s", u.Scheme, u.Host)
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	conn, _, err := websocket.Dial(dialCtx, endpoint.URL, &websocket.DialOptions{HTTPClient: &http.Client{Transport: c.http.Transport, CheckRedirect: c.http.CheckRedirect}})
+	conn, resp, err := websocket.Dial(dialCtx, endpoint.URL, &websocket.DialOptions{HTTPClient: &http.Client{Transport: c.http.Transport, CheckRedirect: c.http.CheckRedirect}})
 	cancel()
-	if err != nil {
+	if err != nil && resp != nil {
+		return fmt.Errorf("ChatGPT messaging socket connection failed: HTTP %d", resp.StatusCode)
+	} else if err != nil {
 		return errors.New("ChatGPT messaging socket connection failed")
 	}
 	defer conn.CloseNow()
@@ -146,7 +162,7 @@ func (c *Client) StreamSignals(ctx context.Context, handle func(Signal) error) e
 	err = conn.Write(writeCtx, websocket.MessageText, []byte(commands))
 	cancel()
 	if err != nil {
-		return errors.New("ChatGPT messaging subscription failed")
+		return fmt.Errorf("ChatGPT messaging subscription failed: %w", err)
 	}
 	subscribed := false
 	for ctx.Err() == nil {

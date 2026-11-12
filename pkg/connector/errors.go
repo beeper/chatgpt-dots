@@ -133,6 +133,8 @@ var errDotUnavailable = errors.New("the linked Dot is no longer the account's Do
 
 var errDotMissing = errors.New("ChatGPT doesn't list a primary Dot for this account")
 
+var errDotReplaced = errors.New("ChatGPT lists a different Dot for this account")
+
 var errNoBaseline = errors.New("no baseline message ID in the Dot room; send a message in ChatGPT before linking")
 
 func wrapLoginError(err error) error {

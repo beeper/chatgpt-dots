@@ -243,6 +243,21 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return c.doAt(ctx, "https://chatgpt.com/backend-api", method, path, body, out)
 }
 func (c *Client) doAt(ctx context.Context, origin, method, path string, body, out any) error {
+	err := c.attempt(ctx, origin, method, path, body, out)
+	var httpErr *HTTPError
+	if method != http.MethodGet || !errors.As(err, &httpErr) || httpErr.Status < http.StatusBadGateway || httpErr.Status > http.StatusGatewayTimeout {
+		return err
+	}
+	timer := time.NewTimer(unavailableReadRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return err
+	case <-timer.C:
+	}
+	return c.attempt(ctx, origin, method, path, body, out)
+}
+func (c *Client) attempt(ctx context.Context, origin, method, path string, body, out any) error {
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
 	if time.Until(c.Identity.Expires) < 5*time.Minute {
@@ -320,8 +335,9 @@ func (c *Client) request(ctx context.Context, method, target string, body, out a
 }
 
 const (
-	maxResponseBytes         = 4 << 20
-	maxStreamedResponseBytes = 64 << 20
+	maxResponseBytes          = 4 << 20
+	maxStreamedResponseBytes  = 64 << 20
+	unavailableReadRetryDelay = time.Second
 )
 
 type SchemaError struct {
@@ -472,19 +488,23 @@ func (c *Client) Verify(ctx context.Context, p Profile) (*Room, error) {
 	c.mu.Lock()
 	c.rooms[p.Room] = true
 	c.mu.Unlock()
-	if len(r.Latest) == 0 {
-		var baseline struct {
-			Items []struct {
-				ID      string    `json:"id"`
-				Created time.Time `json:"created_at"`
-			} `json:"items"`
-		}
-		if err := c.do(ctx, "GET", "/messaging/rooms/"+url.PathEscape(p.Room)+"/messages?limit=1", nil, &baseline); err != nil {
-			return nil, fmt.Errorf("reading the Dot message baseline: %w", err)
-		}
-		r.Latest = baseline.Items
-	}
 	return &r, nil
+}
+func (c *Client) LoadLatest(ctx context.Context, r *Room) error {
+	if len(r.Latest) > 0 {
+		return nil
+	}
+	var baseline struct {
+		Items []struct {
+			ID      string    `json:"id"`
+			Created time.Time `json:"created_at"`
+		} `json:"items"`
+	}
+	if err := c.do(ctx, "GET", "/messaging/rooms/"+url.PathEscape(r.ID)+"/messages?limit=1", nil, &baseline); err != nil {
+		return fmt.Errorf("reading the Dot message baseline: %w", err)
+	}
+	r.Latest = baseline.Items
+	return nil
 }
 func (c *Client) Messages(ctx context.Context, room, after string) (*Page, error) {
 	c.mu.RLock()
