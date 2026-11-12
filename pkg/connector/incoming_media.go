@@ -254,7 +254,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 	api := c.api
 	c.mu.RUnlock()
 	if api == nil || ctx.Err() != nil {
-		return nil, errors.New("ChatGPT connection unavailable for attachment download")
+		return nil, &chatgpt.AttachmentStorageError{Reason: "ChatGPT connection unavailable for attachment download"}
 	}
 	for _, attachment := range attachments {
 		if current[attachment.PartID] {
@@ -340,7 +340,7 @@ func incomingFile(ctx context.Context, api *chatgpt.Client, state *RoomState, po
 	if errors.Is(err, mautrix.MTooLarge) || (errors.As(err, &httpErr) && httpErr.IsStatus(http.StatusRequestEntityTooLarge)) {
 		return nil, &chatgpt.AttachmentUnavailableError{Reason: "file exceeds the Matrix media limit"}
 	} else if err != nil {
-		return nil, errors.New("Matrix attachment upload failed; checkpoint retained")
+		return nil, &chatgpt.AttachmentStorageError{Reason: "Matrix attachment upload failed"}
 	}
 	return content, nil
 }
@@ -352,6 +352,10 @@ func (e mediaRetryError) Error() string {
 }
 
 func (e mediaRetryError) Unwrap() error { return e.error }
+
+type messageError struct{ error }
+
+func (e messageError) Unwrap() error { return e.error }
 
 func onlyMediaRetries(err error) bool {
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {

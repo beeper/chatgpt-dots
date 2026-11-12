@@ -54,13 +54,16 @@ func (c *Client) DownloadAttachment(ctx context.Context, room, fileID string) (*
 		if errors.As(err, &httpErr) && (httpErr.Status == http.StatusNotFound || httpErr.Status == http.StatusGone) {
 			return nil, &AttachmentUnavailableError{Reason: "ChatGPT no longer provides this file"}
 		}
+		if errors.Is(err, ErrTransport) || errors.As(err, &httpErr) && (httpErr.Status >= 500 || httpErr.Status == http.StatusTooManyRequests) {
+			return nil, &AttachmentStorageError{Reason: "attachment lookup failed: " + err.Error()}
+		}
 		return nil, err
 	}
 	if (metadata.ID != "" && metadata.ID != fileID) || (metadata.FileID != "" && metadata.FileID != fileID) {
 		return nil, errors.New("attachment metadata identity mismatch")
 	}
 	if metadata.URL == "" {
-		return nil, errors.New("ChatGPT attachment download is not ready")
+		return nil, &AttachmentStorageError{Reason: "ChatGPT attachment download is not ready"}
 	}
 	u, err := url.Parse(metadata.URL)
 	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || u.Fragment != "" || !strings.HasSuffix(strings.ToLower(u.Hostname()), ".oaiusercontent.com") {
