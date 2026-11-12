@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
@@ -43,7 +44,7 @@ func (c *Client) Avatar(ctx context.Context, profile Profile) (Profile, []byte, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return current.Profile, nil, errors.New("Dot avatar storage denied the download")
+		return current.Profile, nil, fmt.Errorf("Dot avatar storage denied the download: HTTP %d", resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
 	if err != nil || len(data) > 4<<20 {
