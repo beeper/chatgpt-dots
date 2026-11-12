@@ -210,11 +210,7 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	if err != nil {
 		return "", true, errors.New("Could not save ChatGPT's confirmation acknowledgement")
 	}
-	client.rescan.Store(true)
-	select {
-	case client.signalWake <- struct{}{}:
-	default:
-	}
+	client.requestRefresh(room.Profile.Room, string(target.ID), true)
 	return "ChatGPT confirmed this decision: " + ce.Command + ".", false, nil
 }
 

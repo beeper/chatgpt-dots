@@ -40,6 +40,21 @@ func (c *Client) requestSync(full bool) {
 	}
 }
 
+func (c *Client) requestRefresh(room, messageID string, changed bool) {
+	if messageID != "" {
+		c.refreshMu.Lock()
+		if c.refresh == nil {
+			c.refresh = make(map[string]map[string]bool)
+		}
+		if c.refresh[room] == nil {
+			c.refresh[room] = make(map[string]bool)
+		}
+		c.refresh[room][messageID] = c.refresh[room][messageID] || changed
+		c.refreshMu.Unlock()
+	}
+	c.requestSync(false)
+}
+
 func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 	active := make(map[string]*RoomState)
 	clear := func() {
@@ -58,6 +73,7 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 			if signal.Type == "resync" {
 				clear()
 				c.signalsLive.Store(true)
+				c.recheck.Store(true)
 				c.requestSync(false)
 				return nil
 			}
@@ -88,8 +104,10 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 					delete(active, signal.Payload.Room)
 					c.sendTyping(ctx, state, 0)
 				}
-				c.requestSync(false)
-			case "calpico-message-update", "calpico-room-read-receipt", "calpico-room-read", "calpico-room-metadata-update":
+				c.requestRefresh(signal.Payload.Room, signal.Payload.Message.ID, false)
+			case "calpico-message-update", "calpico-message-task-associated":
+				c.requestRefresh(signal.Payload.Room, signal.Payload.MessageID, true)
+			case "calpico-room-read-receipt", "calpico-room-read", "calpico-room-metadata-update":
 				c.requestSync(false)
 			case "calpico-room-leave":
 				c.requestSync(true)
@@ -97,6 +115,7 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 			return nil
 		})
 		c.signalsLive.Store(false)
+		c.recheck.Store(true)
 		c.requestSync(false)
 		clear()
 		if ctx.Err() != nil {

@@ -53,6 +53,9 @@ type Client struct {
 	signalWake     chan struct{}
 	signalsLive    atomic.Bool
 	rescan         atomic.Bool
+	recheck        atomic.Bool
+	refreshMu      sync.Mutex
+	refresh        map[string]map[string]bool
 	receipts       map[string]*receiptState
 	delivered      map[string][32]byte
 	deliveredOrder []string
@@ -179,6 +182,7 @@ func (c *Client) run(ctx context.Context) {
 	c.receipts = make(map[string]*receiptState)
 	c.delivered = make(map[string][32]byte)
 	c.deliveredOrder = nil
+	c.recheck.Store(true)
 	c.failures = make(map[string]int)
 	c.rescanAfter = make(map[string]string)
 	for _, watch := range c.threadMessages {
@@ -594,6 +598,7 @@ func (c *Client) advanceCursor(ctx context.Context, state *RoomState, id string)
 	return nil
 }
 func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
+	recheck := false
 	full := c.rescan.Swap(false)
 	if full {
 		clear(c.rescanAfter)
@@ -613,6 +618,14 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 				return err
 			}
 		}
+	}
+	if c.recheck.Swap(false) {
+		recheck = true
+		defer func() {
+			if err != nil && !onlyMediaRetries(err) {
+				c.recheck.Store(true)
+			}
+		}()
 	}
 	var pending error
 	for _, state := range c.meta.Rooms {
@@ -659,7 +672,7 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			}
 		}
 		after := state.Cursor
-		if len(state.Overlap) > 0 {
+		if recheck && len(state.Overlap) > 0 {
 			after = state.Overlap[0]
 		}
 		if full {
@@ -676,13 +689,17 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			}
 		}
 		c.mu.RUnlock()
+		searchFrom := after
+		if !full && len(state.Overlap) > 0 {
+			searchFrom = state.Overlap[0]
+		}
 		for _, requestID := range pendingIDs {
-			m, err := c.findRequest(ctx, api, state, requestID, after)
+			m, err := c.findRequest(ctx, api, state, requestID, searchFrom)
 			if err != nil {
 				return err
 			}
 			if m != nil {
-				if err = c.deliverMedia(ctx, state, *m, after); err != nil {
+				if err = c.deliverMedia(ctx, state, *m, searchFrom); err != nil {
 					if !onlyMediaRetries(err) {
 						return err
 					}
@@ -757,6 +774,12 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			}
 			after = next
 		}
+		if err := c.refreshMessages(ctx, api, state); err != nil {
+			if !onlyMediaRetries(err) {
+				return err
+			}
+			pending = errors.Join(pending, err)
+		}
 		if err := c.sendReceipt(ctx, state, receipt); err != nil {
 			return err
 		}
@@ -782,6 +805,53 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 		clear(c.rescanAfter)
 	}
 	return pending
+}
+func (c *Client) refreshMessages(ctx context.Context, api *chatgpt.Client, state *RoomState) error {
+	c.refreshMu.Lock()
+	queued := c.refresh[state.Profile.Room]
+	delete(c.refresh, state.Profile.Room)
+	c.refreshMu.Unlock()
+	var pending error
+	for id, changed := range queued {
+		err := c.refreshMessage(ctx, api, state, id, changed)
+		if err != nil && !onlyMediaRetries(err) {
+			c.refreshMu.Lock()
+			for id, changed := range queued {
+				if c.refresh == nil {
+					c.refresh = make(map[string]map[string]bool)
+				}
+				if c.refresh[state.Profile.Room] == nil {
+					c.refresh[state.Profile.Room] = make(map[string]bool)
+				}
+				c.refresh[state.Profile.Room][id] = c.refresh[state.Profile.Room][id] || changed
+			}
+			c.refreshMu.Unlock()
+			return err
+		}
+		pending = errors.Join(pending, err)
+		delete(queued, id)
+	}
+	return pending
+}
+func (c *Client) refreshMessage(ctx context.Context, api *chatgpt.Client, state *RoomState, id string, changed bool) error {
+	existing, err := c.connector.bridge.DB.Message.GetFirstPartByID(ctx, c.login.ID, networkid.MessageID(id))
+	if err != nil {
+		return err
+	}
+	if existing != nil && !changed {
+		return nil
+	}
+	m, previous, err := api.MessageAndPrevious(ctx, state.Profile.Room, id)
+	if errors.Is(err, chatgpt.ErrMessageNotFound) {
+		c.login.Log.Debug().Str("message_id", id).Msg("ChatGPT no longer returns a message it reported as changed")
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if previous == "" {
+		previous = state.Baseline
+	}
+	return c.deliverMedia(ctx, state, *m, previous)
 }
 func (c *Client) saveMediaRetry(ctx context.Context, state *RoomState, id, after, revision string, failed bool) error {
 	c.mu.Lock()
