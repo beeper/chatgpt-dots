@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -93,6 +94,54 @@ func messageAttachments(m chatgpt.Message) []incomingAttachment {
 		result[i] = attachment
 	}
 	return result
+}
+
+func (c *Client) warnUnrecognized(m chatgpt.Message, existing []*database.Message) {
+	var unrecognized []string
+	for _, key := range m.Content.Unknown {
+		unrecognized = append(unrecognized, "content."+key)
+	}
+	for key := range m.Metadata {
+		switch key {
+		case "turn_trigger", "elicitation_delivery", "elicitation_delivery_route", "approval_ref":
+		default:
+			unrecognized = append(unrecognized, "message_metadata."+key)
+		}
+	}
+	for _, raw := range m.Content.Attachments {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(raw, &fields)
+		var kind string
+		_ = json.Unmarshal(fields["type"], &kind)
+		switch kind {
+		case "file", "thread", "link", "widget":
+			continue
+		}
+		keys := make([]string, 0, len(fields))
+		for key := range fields {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		unrecognized = append(unrecognized, "attachment."+kind+"("+strings.Join(keys, ",")+")")
+	}
+	if m.Deleted == nil && m.Content.Text == "" && m.Content.Elicitation == nil && len(mappedAttachments(m, existing)) == 0 {
+		unrecognized = append(unrecognized, "no_content")
+	}
+	c.mu.Lock()
+	var fresh []string
+	for _, key := range unrecognized {
+		if !c.unrecognized[key] {
+			if c.unrecognized == nil {
+				c.unrecognized = make(map[string]bool)
+			}
+			c.unrecognized[key] = true
+			fresh = append(fresh, key)
+		}
+	}
+	c.mu.Unlock()
+	if len(fresh) > 0 {
+		c.login.Log.Warn().Str("message_id", m.ID).Strs("unrecognized", fresh).Msg("ChatGPT message has content the bridge doesn't recognize")
+	}
 }
 
 func outgoingMediaAnchor(existing []*database.Message) bool {
@@ -344,6 +393,8 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 		} else if attachment.Type == "thread" {
 			thread = m.Threads[attachment.ThreadID]
 			content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: threadBody(thread)}
+		} else if attachment.Type == "widget" {
+			content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "This card needs the ChatGPT interface: https://chatgpt.com/dots/home"}
 		}
 		if attachment.PartID == caption && text != "" {
 			applyCaption(content, text)

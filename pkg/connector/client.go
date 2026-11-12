@@ -63,6 +63,7 @@ type Client struct {
 	selfAvatarTime time.Time
 	failures       map[string]int
 	rescanAfter    map[string]string
+	unrecognized   map[string]bool
 }
 
 func (c *Client) Connect(ctx context.Context) {
@@ -1027,6 +1028,7 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	if incomingStale(m, existing) {
 		return c.clearPending(ctx, m.RequestID)
 	}
+	c.warnUnrecognized(m, existing)
 	c.prepareThreads(state, &m, existing)
 	var cleanup func() error
 	done := make(chan struct{}, 1)

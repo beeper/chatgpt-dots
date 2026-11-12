@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,22 +78,45 @@ func (p Profile) DisplayName() string {
 }
 
 type Message struct {
-	ID                 string                   `json:"id"`
-	Created            time.Time                `json:"created_at"`
-	Updated            time.Time                `json:"updated_at"`
-	Sender             string                   `json:"account_user_id"`
-	RequestID          string                   `json:"request_id"`
-	Deleted            *time.Time               `json:"deleted_at"`
-	Threads            map[string]*ThreadStatus `json:"-"`
-	Reactions          map[string]string        `json:"reactions"`
-	ReplyTo            *ReplyTarget             `json:"reply_to,omitempty"`
-	ReplyRootMessageID string                   `json:"reply_root_message_id,omitempty"`
-	Content            struct {
-		Text        string            `json:"text"`
-		Attachments []json.RawMessage `json:"attachments"`
-		Elicitation *Elicitation      `json:"elicitation,omitempty"`
-	} `json:"content"`
+	ID                 string                     `json:"id"`
+	Created            time.Time                  `json:"created_at"`
+	Updated            time.Time                  `json:"updated_at"`
+	Sender             string                     `json:"account_user_id"`
+	RequestID          string                     `json:"request_id"`
+	Deleted            *time.Time                 `json:"deleted_at"`
+	Threads            map[string]*ThreadStatus   `json:"-"`
+	Reactions          map[string]string          `json:"reactions"`
+	ReplyTo            *ReplyTarget               `json:"reply_to,omitempty"`
+	ReplyRootMessageID string                     `json:"reply_root_message_id,omitempty"`
+	Metadata           map[string]json.RawMessage `json:"message_metadata,omitempty"`
+	Content            MessageContent             `json:"content"`
 }
+type MessageContent struct {
+	Text        string            `json:"text"`
+	Attachments []json.RawMessage `json:"attachments"`
+	Elicitation *Elicitation      `json:"elicitation,omitempty"`
+	Unknown     []string          `json:"-"`
+}
+
+func (c *MessageContent) UnmarshalJSON(data []byte) error {
+	type content MessageContent
+	if err := json.Unmarshal(data, (*content)(c)); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	c.Unknown = nil
+	for key, value := range fields {
+		if key != "text" && key != "attachments" && key != "elicitation" && string(value) != "null" {
+			c.Unknown = append(c.Unknown, key)
+		}
+	}
+	slices.Sort(c.Unknown)
+	return nil
+}
+
 type Room struct {
 	Type         string        `json:"type"`
 	Source       string        `json:"app_source"`
