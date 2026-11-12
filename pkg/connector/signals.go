@@ -11,10 +11,12 @@ import (
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
+	"maunium.net/go/mautrix/event"
 )
 
 type receiptState struct {
 	Native     chatgpt.ReadReceipt
+	Human      chatgpt.ReadReceipt
 	SentReadAt time.Time
 	SentTime   time.Time
 }
@@ -105,7 +107,7 @@ func (c *Client) streamSignals(ctx context.Context, api *chatgpt.Client) {
 				c.requestRefresh(signal.Payload.Room, signal.Payload.Message.ID, false)
 			case "calpico-message-update", "calpico-message-task-associated":
 				c.requestRefresh(signal.Payload.Room, signal.Payload.MessageID, true)
-			case "calpico-room-read-receipt", "calpico-room-metadata-update":
+			case "calpico-room-read-receipt", "calpico-room-read", "calpico-room-metadata-update":
 				c.requestSync(false)
 			case "calpico-room-leave":
 				c.requestSync(true)
@@ -169,11 +171,17 @@ func (c *Client) readReceipt(ctx context.Context, api *chatgpt.Client, state *Ro
 		c.receipts[state.Profile.Room] = receipt
 	}
 	for _, native := range room.ReadReceipts {
-		if native.Member != state.DotMember || native.ReadAt.IsZero() {
+		if native.ReadAt.IsZero() {
 			continue
 		}
-		if native.ReadAt.After(receipt.Native.ReadAt) || (native.ReadAt.Equal(receipt.Native.ReadAt) && receipt.Native.Updated.IsZero() && !native.Updated.IsZero()) {
-			receipt.Native = native
+		current := &receipt.Native
+		if native.Member == state.HumanMember {
+			current = &receipt.Human
+		} else if native.Member != state.DotMember {
+			continue
+		}
+		if native.ReadAt.After(current.ReadAt) || (native.ReadAt.Equal(current.ReadAt) && current.Updated.IsZero() && !native.Updated.IsZero()) {
+			*current = native
 		}
 	}
 	return receipt, nil
@@ -202,6 +210,78 @@ func (c *Client) sendReceipt(ctx context.Context, state *RoomState, receipt *rec
 	receipt.SentReadAt, receipt.SentTime = receipt.Native.ReadAt, receipt.Native.Updated
 	return nil
 }
+
+func (c *Client) sendHumanReceipt(ctx context.Context, state *RoomState, receipt *receiptState) error {
+	c.mu.RLock()
+	bridged := state.HumanRead
+	c.mu.RUnlock()
+	if !receipt.Human.ReadAt.After(bridged) {
+		return nil
+	}
+	if !bridged.IsZero() {
+		evt := &simplevent.Receipt{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventReadReceipt, PortalKey: c.key(state), Sender: bridgev2.EventSender{Sender: c.GetUserID(), SenderLogin: c.login.ID, IsFromMe: true}, Timestamp: receipt.Human.Updated}, ReadUpTo: receipt.Human.ReadAt}
+		evt.MutateContextFunc = func(context.Context) context.Context { return ctx }
+		if result := c.login.QueueRemoteEvent(evt); !result.Success && !result.Ignored {
+			return errors.New("could not bridge own ChatGPT read receipt")
+		}
+	}
+	return c.saveHumanRead(ctx, state, receipt.Human.ReadAt)
+}
+
+func (c *Client) saveHumanRead(ctx context.Context, state *RoomState, readAt time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !readAt.After(state.HumanRead) {
+		return nil
+	}
+	previous := state.HumanRead
+	state.HumanRead = readAt
+	if err := c.login.Save(ctx); err != nil {
+		state.HumanRead = previous
+		return err
+	}
+	return nil
+}
+
+func (c *Client) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev2.MatrixReadReceipt) error {
+	if msg.Receipt.ThreadID != "" && msg.Receipt.ThreadID != event.ReadReceiptThreadMain {
+		return nil
+	}
+	c.mu.RLock()
+	api, generation := c.api, c.runContext
+	state := c.meta.Rooms[string(msg.Portal.ID)]
+	c.mu.RUnlock()
+	if state == nil || msg.Portal.Receiver != c.login.ID {
+		return errors.New("refusing read receipt in an unverified Dot room")
+	}
+	target := msg.ExactMessage
+	if target == nil {
+		var err error
+		if target, err = c.connector.bridge.DB.Message.GetLastNonFakePartAtOrBeforeTime(ctx, msg.Portal.PortalKey, msg.ReadUpTo); err != nil {
+			return err
+		}
+	}
+	c.mu.RLock()
+	read := target != nil && target.Timestamp.After(state.HumanRead)
+	c.mu.RUnlock()
+	if !read {
+		return nil
+	}
+	if api == nil || generation == nil || generation.Err() != nil || !c.IsLoggedIn() {
+		return errors.New("not connected to ChatGPT")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(generation, cancel)
+	defer stop()
+	if err := api.MarkRead(ctx, state.Profile.Room, target.Timestamp); err != nil {
+		return err
+	}
+	msg.ReadUpTo = target.Timestamp
+	return c.saveHumanRead(ctx, state, target.Timestamp)
+}
+
+var _ bridgev2.ReadReceiptHandlingNetworkAPI = (*Client)(nil)
 
 type reactionSnapshot struct {
 	simplevent.ReactionSync

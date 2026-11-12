@@ -17,11 +17,11 @@ import (
 func isHEICImage(mimeType, fileName string) bool {
 	mimeType, _, _ = strings.Cut(strings.ToLower(mimeType), ";")
 	switch strings.TrimSpace(mimeType) {
-	case "image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence":
+	case "image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence", "image/avif":
 		return true
 	}
 	extension := strings.ToLower(filepath.Ext(fileName))
-	return extension == ".heic" || extension == ".heif"
+	return extension == ".heic" || extension == ".heif" || extension == ".avif"
 }
 
 func jpegFileName(fileName string) string {
