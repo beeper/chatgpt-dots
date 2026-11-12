@@ -51,6 +51,7 @@ type RoomState struct {
 	DotMember   string                `json:"dot_member"`
 	HumanMember string                `json:"human_member"`
 	HumanName   string                `json:"human_name,omitempty"`
+	HumanRead   time.Time             `json:"human_read"`
 	Linked      time.Time             `json:"linked"`
 	Baseline    string                `json:"baseline"`
 	Cursor      string                `json:"cursor"`

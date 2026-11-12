@@ -16,13 +16,14 @@ protocol can interrupt the connection.
 - Images, files and videos in both directions, with a bridge-local 20 MiB limit.
 - Task cards whose titles and status update in place.
 - Confirmation cards with explicit accept, decline and status commands.
-- Incoming typing indicators and read receipts.
+- Incoming typing indicators.
+- Read receipts in both directions, including chats read in ChatGPT.
 - Separate Dot and account avatars, account profile refresh and session renewal.
 - Recovery of messages received after linking, including across restarts.
 
 The bridge connects one existing primary Dot in a personal account. It does not
 import regular ChatGPT conversations or pre-link history. Groups, creating Dots,
-voice notes and sending typing or read receipts are
+voice notes and sending typing are
 not supported. Some native message formats remain unsupported. See the
 [setup guide](docs/README.md) to run a standalone instance.
 
