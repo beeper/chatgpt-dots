@@ -32,6 +32,7 @@ type LoginMetadata struct {
 	ConfirmationVersion int                           `json:"confirmation_version,omitempty"`
 	Rescan              bool                          `json:"rescan,omitempty"`
 	SelfAvatarHash      string                        `json:"self_avatar_hash,omitempty"`
+	SelfAvatarID        string                        `json:"self_avatar_id,omitempty"`
 }
 type PendingSend struct {
 	// Missing in older records means delivery may have happened.
@@ -44,6 +45,7 @@ type PendingSend struct {
 	Timestamp   int64      `json:"timestamp"`
 	BodyHash    string     `json:"body_hash"`
 	ReplyTo     string     `json:"reply_to,omitempty"`
+	Attempted   time.Time  `json:"attempted,omitzero"`
 }
 type RoomState struct {
 	Avatar      *bridgev2.Avatar      `json:"-"`
@@ -51,11 +53,14 @@ type RoomState struct {
 	DotMember   string                `json:"dot_member"`
 	HumanMember string                `json:"human_member"`
 	HumanName   string                `json:"human_name,omitempty"`
+	HumanRead   time.Time             `json:"human_read"`
 	Linked      time.Time             `json:"linked"`
 	Baseline    string                `json:"baseline"`
 	Cursor      string                `json:"cursor"`
 	Overlap     []string              `json:"overlap"`
 	Media       map[string]MediaRetry `json:"media,omitempty"`
+
+	avatarFailed time.Time
 }
 type MediaRetry struct {
 	Start    string        `json:"start"`
@@ -246,6 +251,9 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 		if err != nil {
 			return nil, err
 		}
+		if err = api.LoadLatest(ctx, room); err != nil {
+			return nil, err
+		}
 		state, err := roomState(api, p, room)
 		if err != nil {
 			return nil, err
@@ -283,20 +291,9 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 	return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "chatgpt-dots.complete", Instructions: "Connected the existing primary Dot. Only messages after linking are bridged.", CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: login.ID, UserLogin: login}}, nil
 }
 func roomState(api *chatgpt.Client, p chatgpt.Profile, r *chatgpt.Room) (*RoomState, error) {
-	state := &RoomState{Profile: p, Linked: time.Now()}
-	for _, m := range r.Members {
-		if m.Aeon == p.ID {
-			state.DotMember = m.ID
-		} else if m.Aeon == "" {
-			if state.HumanMember != "" {
-				return nil, errors.New("Dot room has multiple human members")
-			}
-			state.HumanMember = m.ID
-			state.HumanName = m.Name
-		}
-	}
-	if state.DotMember == "" || state.HumanMember == "" || len(r.Members) != 2 {
-		return nil, errors.New("expected a verified one-to-one Dot room")
+	state, err := roomMembers(api, p, r)
+	if err != nil {
+		return nil, err
 	}
 	var latest time.Time
 	for _, m := range r.Latest {
@@ -313,6 +310,24 @@ func roomState(api *chatgpt.Client, p chatgpt.Profile, r *chatgpt.Room) (*RoomSt
 	}
 	if latest.IsZero() {
 		return nil, errors.New("baseline message lacks a timestamp; cannot establish safe history boundary")
+	}
+	return state, nil
+}
+func roomMembers(api *chatgpt.Client, p chatgpt.Profile, r *chatgpt.Room) (*RoomState, error) {
+	state := &RoomState{Profile: p, Linked: time.Now()}
+	for _, m := range r.Members {
+		if m.Aeon == p.ID {
+			state.DotMember = m.ID
+		} else if m.Aeon == "" {
+			if state.HumanMember != "" {
+				return nil, errors.New("Dot room has multiple human members")
+			}
+			state.HumanMember = m.ID
+			state.HumanName = m.Name
+		}
+	}
+	if state.DotMember == "" || state.HumanMember == "" || len(r.Members) != 2 {
+		return nil, errors.New("expected a verified one-to-one Dot room")
 	}
 	if !api.Identity.IsSelf(state.HumanMember) {
 		return nil, errors.New("room human member does not match token user; workspace account-user mapping is not verified")

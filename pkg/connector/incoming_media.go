@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"slices"
 	"strings"
@@ -28,6 +29,49 @@ type incomingAttachment struct {
 	AttachmentID string           `json:"attachment_id"`
 	ThreadID     string           `json:"thread_id"`
 	PartID       networkid.PartID `json:"-"`
+}
+
+type linkAttachment struct {
+	Type           string          `json:"type"`
+	URL            string          `json:"url"`
+	Title          string          `json:"title"`
+	Description    string          `json:"description"`
+	ThumbnailURL   string          `json:"thumbnail_url"`
+	ConversationID string          `json:"conversation_id"`
+	AutomationID   string          `json:"automation_id"`
+	Site           json.RawMessage `json:"site"`
+}
+
+func (c *Client) linkPreviews(ctx context.Context, api *chatgpt.Client, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, m chatgpt.Message) []*event.BeeperLinkPreview {
+	var previews []*event.BeeperLinkPreview
+	seen := make(map[string]bool)
+	for _, raw := range m.Content.Attachments {
+		var link linkAttachment
+		if json.Unmarshal(raw, &link) != nil || link.Type != "link" || link.ConversationID != "" || link.AutomationID != "" || len(link.Site) > 0 && string(link.Site) != "null" || seen[link.URL] {
+			continue
+		}
+		u, err := url.Parse(link.URL)
+		title := strings.TrimSpace(link.Title)
+		if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" || title == "" {
+			continue
+		}
+		seen[link.URL] = true
+		preview := &event.BeeperLinkPreview{MatchedURL: link.URL, LinkPreview: event.LinkPreview{CanonicalURL: link.URL, Title: title, Description: strings.TrimSpace(link.Description)}}
+		if link.ThumbnailURL != "" && api != nil {
+			image, err := api.LinkThumbnail(ctx, link.ThumbnailURL)
+			if err == nil {
+				preview.ImageURL, preview.ImageEncryption, err = intent.UploadMedia(ctx, portal.MXID, image.Data, "", image.MIME)
+			}
+			if err != nil {
+				c.login.Log.Warn().Err(err).Str("message_id", m.ID).Msg("Could not bridge ChatGPT link preview image")
+			} else {
+				preview.ImageType, preview.ImageSize = image.MIME, event.IntOrString(len(image.Data))
+				preview.ImageWidth, preview.ImageHeight = event.IntOrString(image.Width), event.IntOrString(image.Height)
+			}
+		}
+		previews = append(previews, preview)
+	}
+	return previews
 }
 
 func messageAttachments(m chatgpt.Message) []incomingAttachment {
@@ -269,6 +313,9 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 	if m.Deleted == nil && m.Content.Text == "" && m.Content.Elicitation == nil && len(attachments) == 0 {
 		return result, nil
 	}
+	c.mu.RLock()
+	api := c.api
+	c.mu.RUnlock()
 	add := func(id networkid.PartID, content *event.MessageEventContent, thread *chatgpt.ThreadStatus, attachment *incomingAttachment, media *event.MessageEventContent) {
 		confirmation := ""
 		if m.Deleted == nil && m.Sender == state.DotMember {
@@ -286,6 +333,8 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			content := renderText(text)
 			if m.Deleted != nil {
 				content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "[Message deleted in ChatGPT]"}
+			} else {
+				content.BeeperLinkPreviews = c.linkPreviews(ctx, api, portal, intent, m)
 			}
 			add(partID, content, nil, nil, nil)
 		}
@@ -294,16 +343,15 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 	if !current[caption] {
 		for _, old := range existing {
 			if md, ok := old.Metadata.(*MessageMetadata); ok && md.TextAnchor && old.PartID == caption {
-				add(caption, renderText(text), nil, nil, nil)
+				content := renderText(text)
+				content.BeeperLinkPreviews = c.linkPreviews(ctx, api, portal, intent, m)
+				add(caption, content, nil, nil, nil)
 				break
 			}
 		}
 	}
-	c.mu.RLock()
-	api := c.api
-	c.mu.RUnlock()
 	if api == nil || ctx.Err() != nil {
-		return nil, errors.New("ChatGPT connection unavailable for attachment download")
+		return nil, &chatgpt.AttachmentStorageError{Reason: "ChatGPT connection unavailable for attachment download"}
 	}
 	for _, attachment := range attachments {
 		if current[attachment.PartID] {
@@ -350,6 +398,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 		}
 		if attachment.PartID == caption && text != "" {
 			applyCaption(content, text)
+			content.BeeperLinkPreviews = c.linkPreviews(ctx, api, portal, intent, m)
 		}
 		add(attachment.PartID, content, thread, &attachment, media)
 	}
@@ -382,6 +431,8 @@ func incomingFile(ctx context.Context, api *chatgpt.Client, state *RoomState, po
 		content.MsgType = event.MsgImage
 	} else if strings.HasPrefix(mimeType, "video/") {
 		content.MsgType = event.MsgVideo
+	} else if strings.HasPrefix(mimeType, "audio/") {
+		content.MsgType = event.MsgAudio
 	}
 	content.URL, content.File, err = intent.UploadMedia(ctx, portal.MXID, file.Data, name, mimeType)
 	if ctx.Err() != nil {
@@ -391,7 +442,7 @@ func incomingFile(ctx context.Context, api *chatgpt.Client, state *RoomState, po
 	if errors.Is(err, mautrix.MTooLarge) || (errors.As(err, &httpErr) && httpErr.IsStatus(http.StatusRequestEntityTooLarge)) {
 		return nil, &chatgpt.AttachmentUnavailableError{Reason: "file exceeds the Matrix media limit"}
 	} else if err != nil {
-		return nil, errors.New("Matrix attachment upload failed; checkpoint retained")
+		return nil, &chatgpt.AttachmentStorageError{Reason: "Matrix attachment upload failed"}
 	}
 	return content, nil
 }
@@ -403,6 +454,10 @@ func (e mediaRetryError) Error() string {
 }
 
 func (e mediaRetryError) Unwrap() error { return e.error }
+
+type messageError struct{ error }
+
+func (e messageError) Unwrap() error { return e.error }
 
 func onlyMediaRetries(err error) bool {
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
