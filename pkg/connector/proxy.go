@@ -159,7 +159,11 @@ func (t *proxyTransport) update(ctx context.Context, reason string) error {
 		t.log.Info().Str("reason", reason).Str("proxy_host", proxy.Host).Msg("Using proxy")
 	}
 	t.failed.Store(false)
-	if old := t.current.Swap(newEgress(proxy)); old != nil {
+	next := newEgress(proxy)
+	if old := t.current.Load(); old != nil && old.proxyHost == next.proxyHost {
+		next.cookies = old.cookies
+	}
+	if old := t.current.Swap(next); old != nil {
 		old.close()
 	}
 	return nil
