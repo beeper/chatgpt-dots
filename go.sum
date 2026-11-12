@@ -6,6 +6,8 @@ github.com/andybalholm/brotli v1.2.4 h1:649LN6qF+/7JJYNN3Wdu4Dt5PS6eC/yP/Go3Bb0/
 github.com/andybalholm/brotli v1.2.4/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/beeper/req/v3 v3.0.0-20260925135712-b49593750e56 h1:VQTcNnqViZfzYJtDue7HUF9Y979KdafTdJkX/DPasSQ=
 github.com/beeper/req/v3 v3.0.0-20260925135712-b49593750e56/go.mod h1:1nX+ECJqEyUXbQHlubo2nKckcfIF7L8+xrG4k4gx1F4=
+github.com/beeper/req/v3 v3.0.0-20261112020631-42bebc180e13 h1:7A5E9Uz5uORbuYPnTagsL2aiDmA5Xb54Db33/3RT6hg=
+github.com/beeper/req/v3 v3.0.0-20261112020631-42bebc180e13/go.mod h1:1nX+ECJqEyUXbQHlubo2nKckcfIF7L8+xrG4k4gx1F4=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/coreos/go-systemd/v22 v22.7.0 h1:LAEzFkke61DFROc7zNLX/WA2i5J8gYqe0rSj9KI28KA=
