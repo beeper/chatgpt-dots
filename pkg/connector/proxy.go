@@ -46,7 +46,11 @@ func (c *Connector) getProxy(ctx context.Context, reason string) (string, error)
 	req.Header.Set("User-Agent", mautrix.DefaultUserAgent)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", errors.New("proxy request failed")
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return "", fmt.Errorf("proxy request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -93,6 +97,16 @@ func newEgress(proxy *url.URL) *egress {
 	return &egress{api: api.GetTransport(), websocket: websocket, cookies: cookies, proxyHost: proxyHost}
 }
 
+func (t *proxyTransport) host() string {
+	if t == nil {
+		return ""
+	}
+	if current := t.current.Load(); current != nil {
+		return current.proxyHost
+	}
+	return ""
+}
+
 func (e *egress) close() {
 	e.api.CloseIdleConnections()
 	e.websocket.CloseIdleConnections()
@@ -132,6 +146,16 @@ func (t *proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		return nil, err
 	}
+	switch resp.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		t.failed.Store(true)
+		t.log.Warn().
+			Int("status", resp.StatusCode).
+			Str("proxy_host", current.proxyHost).
+			Str("host", r.URL.Host).
+			Str("path", r.URL.Path).
+			Msg("ChatGPT gateway error")
+	}
 	var keep []*http.Cookie
 	for _, cookie := range resp.Cookies() {
 		if slices.Contains(cloudflareCookies, cookie.Name) {
@@ -159,7 +183,11 @@ func (t *proxyTransport) update(ctx context.Context, reason string) error {
 		t.log.Info().Str("reason", reason).Str("proxy_host", proxy.Host).Msg("Using proxy")
 	}
 	t.failed.Store(false)
-	if old := t.current.Swap(newEgress(proxy)); old != nil {
+	next := newEgress(proxy)
+	if old := t.current.Load(); old != nil && old.proxyHost == next.proxyHost {
+		next.cookies = old.cookies
+	}
+	if old := t.current.Swap(next); old != nil {
 		old.close()
 	}
 	return nil

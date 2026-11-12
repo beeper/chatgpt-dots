@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 )
 
 type ReplyTarget struct {
@@ -34,21 +35,33 @@ func (c *Client) Replies(ctx context.Context, room, root, before string) (*Page,
 	return &page, err
 }
 
+var ErrMessageNotFound = errors.New("ChatGPT did not return the requested message")
+
 func (c *Client) Message(ctx context.Context, room, messageID string) (*Message, error) {
+	message, _, err := c.MessageAndPrevious(ctx, room, messageID)
+	return message, err
+}
+
+func (c *Client) MessageAndPrevious(ctx context.Context, room, messageID string) (*Message, string, error) {
 	if err := c.interactionRoom(room, messageID); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	query := url.Values{"limit": {"32"}, "around": {messageID}}
 	var page Page
 	if err := c.do(ctx, http.MethodGet, "/messaging/rooms/"+url.PathEscape(room)+"/messages?"+query.Encode(), nil, &page); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	for _, message := range page.Items {
+	sort.SliceStable(page.Items, func(i, j int) bool { return page.Items[i].Created.Before(page.Items[j].Created) })
+	for i, message := range page.Items {
 		if message.ID == messageID {
-			return &message, nil
+			previous := ""
+			if i > 0 {
+				previous = page.Items[i-1].ID
+			}
+			return &message, previous, nil
 		}
 	}
-	return nil, errors.New("ChatGPT did not return the requested message")
+	return nil, "", ErrMessageNotFound
 }
 
 func (c *Client) SetReaction(ctx context.Context, room, messageID string, emoji *string) error {

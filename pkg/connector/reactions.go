@@ -46,7 +46,7 @@ func (c *Client) reactionClient(ctx context.Context, portal *bridgev2.Portal, ro
 	verified, err := api.Verify(ctx, state.Profile)
 	if err == nil {
 		var current *RoomState
-		current, err = roomState(api, state.Profile, verified)
+		current, err = roomMembers(api, state.Profile, verified)
 		if err == nil && (current.DotMember != state.DotMember || current.HumanMember != state.HumanMember) {
 			err = errors.New("Dot room members changed; refusing reaction")
 		}
@@ -76,7 +76,7 @@ func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixR
 		c.logReactionFailure(ctx, err, "add_reaction", pre.Emoji, msg.TargetMessage)
 		return nil, wrapSendError(err, isRejection(err))
 	}
-	c.requestSync(true)
+	c.requestRefresh(state.Profile.Room, string(msg.TargetMessage.ID), true)
 	return &database.Reaction{Emoji: pre.Emoji}, nil
 }
 
@@ -100,14 +100,14 @@ func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.M
 		return wrapSendError(err, true)
 	}
 	if current.Reactions[state.HumanMember] != target.Emoji {
-		c.requestSync(true)
+		c.requestRefresh(state.Profile.Room, string(target.MessageID), true)
 		return nil
 	}
 	if err = api.SetReaction(ctx, state.Profile.Room, string(target.MessageID), nil); err != nil {
 		c.logReactionFailure(ctx, err, "remove_reaction", target.Emoji, nil)
 		return wrapSendError(err, isRejection(err))
 	}
-	c.requestSync(true)
+	c.requestRefresh(state.Profile.Room, string(target.MessageID), true)
 	return nil
 }
 

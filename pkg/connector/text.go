@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,6 +28,32 @@ func renderText(text string) *event.MessageEventContent {
 		content.Body = format.HTMLToText(content.FormattedBody)
 	}
 	return &content
+}
+
+var matrixHTMLParser = func() *format.HTMLParser {
+	parser := *format.MarkdownHTMLParser
+	parser.UnderlineConverter = func(text string, _ format.Context) string { return text }
+	parser.LinkConverter = func(text, href string, _ format.Context) string {
+		if text == href {
+			return text
+		}
+		return "[" + text + "](" + href + ")"
+	}
+	return &parser
+}()
+
+func matrixText(ctx context.Context, content *event.MessageEventContent, media bool) string {
+	text := content.Body
+	if media {
+		text = content.GetCaption()
+	}
+	if text == "" || content.Format != event.FormatHTML || content.FormattedBody == "" {
+		return text
+	}
+	if converted := matrixHTMLParser.Parse(content.FormattedBody, format.NewContext(ctx)); strings.TrimSpace(converted) != "" {
+		return converted
+	}
+	return text
 }
 
 func textRevision(m chatgpt.Message, base string) string {
