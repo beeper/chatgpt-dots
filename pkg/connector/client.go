@@ -944,8 +944,9 @@ func (c *Client) refreshMessage(ctx context.Context, api *chatgpt.Client, state 
 		return nil
 	}
 	m, previous, err := api.MessageAndPrevious(ctx, state.Profile.Room, id)
-	if errors.Is(err, chatgpt.ErrMessageNotFound) {
-		c.login.Log.Debug().Str("message_id", id).Msg("ChatGPT no longer returns a message it reported as changed")
+	var httpErr *chatgpt.HTTPError
+	if errors.Is(err, chatgpt.ErrMessageNotFound) || errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound {
+		c.login.Log.Debug().Err(err).Str("message_id", id).Msg("ChatGPT no longer returns a message it reported as changed")
 		return nil
 	} else if err != nil {
 		return err
