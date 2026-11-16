@@ -220,7 +220,7 @@ func (c *Connector) confirmationTarget(ctx context.Context, ce *commands.Event) 
 	if code == "" && ce.ReplyTo != "" {
 		return c.bridge.DB.Message.GetPartByMXID(ctx, ce.ReplyTo)
 	}
-	if ce.ReplyTo != "" || len(code) != 12 || strings.Trim(code, "0123456789abcdef") != "" {
+	if len(code) != 12 || strings.Trim(code, "0123456789abcdef") != "" {
 		return nil, errors.New("invalid confirmation code")
 	}
 	rows, err := c.bridge.DB.Message.GetDB().Query(ctx, `SELECT MIN(rowid) FROM message WHERE bridge_id=$1 AND room_id=$2 AND room_receiver=$3 AND metadata->>'confirmation' LIKE $4 GROUP BY id LIMIT 2`, c.bridge.ID, ce.Portal.ID, ce.Portal.Receiver, code+"%")
@@ -242,5 +242,18 @@ func (c *Connector) confirmationTarget(ctx context.Context, ce *commands.Event) 
 	if err != nil || len(rowIDs) != 1 {
 		return nil, errors.New("confirmation code is missing or ambiguous")
 	}
-	return c.bridge.DB.Message.GetByRowID(ctx, rowIDs[0])
+	target, err := c.bridge.DB.Message.GetByRowID(ctx, rowIDs[0])
+	if err != nil || target == nil || ce.ReplyTo == "" {
+		return target, err
+	}
+	replied, err := c.bridge.DB.Message.GetPartByMXID(ctx, ce.ReplyTo)
+	if err != nil {
+		return nil, err
+	}
+	if replied != nil && replied.ID != target.ID {
+		if metadata, ok := replied.Metadata.(*MessageMetadata); ok && metadata.Confirmation != "" {
+			return nil, errors.New("confirmation code does not match the replied-to card")
+		}
+	}
+	return target, nil
 }
