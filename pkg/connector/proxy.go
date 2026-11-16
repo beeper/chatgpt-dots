@@ -77,6 +77,8 @@ var browserHeaders = map[string]string{
 
 var cloudflareCookies = []string{"__cf_bm", "__cflb", "_cfuvid", "cf_clearance"}
 
+const proxyRefreshInterval = 12 * time.Hour
+
 type egress struct {
 	api       *req.Transport
 	websocket *http.Transport
@@ -107,6 +109,15 @@ func (t *proxyTransport) host() string {
 	return ""
 }
 
+func (t *proxyTransport) stale() bool {
+	refreshAt := t.refreshAt.Load()
+	return refreshAt != 0 && time.Now().UnixNano() >= refreshAt
+}
+
+func (t *proxyTransport) postponeRefresh(d time.Duration) {
+	t.refreshAt.Store(time.Now().Add(d).UnixNano())
+}
+
 func (e *egress) close() {
 	e.api.CloseIdleConnections()
 	e.websocket.CloseIdleConnections()
@@ -117,6 +128,7 @@ type proxyTransport struct {
 	log       zerolog.Logger
 	current   atomic.Pointer[egress]
 	failed    atomic.Bool
+	refreshAt atomic.Int64
 }
 
 func (t *proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -183,6 +195,9 @@ func (t *proxyTransport) update(ctx context.Context, reason string) error {
 		t.log.Info().Str("reason", reason).Str("proxy_host", proxy.Host).Msg("Using proxy")
 	}
 	t.failed.Store(false)
+	if t.connector.Config.GetProxyURL != "" {
+		t.refreshAt.Store(time.Now().Add(proxyRefreshInterval).UnixNano())
+	}
 	next := newEgress(proxy)
 	if old := t.current.Load(); old != nil && old.proxyHost == next.proxyHost {
 		next.cookies = old.cookies

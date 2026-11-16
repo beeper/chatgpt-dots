@@ -316,10 +316,14 @@ func (c *Client) serve(ctx context.Context, api *chatgpt.Client, proxy *proxyTra
 			return false
 		}
 		proxyHost := proxy.host()
-		if proxy.failed.Load() {
-			if proxyErr := proxy.update(ctx, "connect"); proxyErr != nil {
-				c.login.Log.Warn().Err(proxyErr).Msg("Could not refresh ChatGPT proxy")
-				err = errors.Join(err, proxyErr)
+		if failed := proxy.failed.Load(); failed || proxy.stale() {
+			if proxyErr := proxy.update(ctx, "refresh"); proxyErr != nil {
+				c.login.Log.Warn().Err(proxyErr).Bool("transport_failed", failed).Msg("Could not refresh ChatGPT proxy")
+				if failed {
+					err = errors.Join(err, proxyErr)
+				} else {
+					proxy.postponeRefresh(dotRecheckInterval)
+				}
 			}
 		}
 		wake := c.nextWake(nextAvatarRefresh)
