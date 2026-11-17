@@ -1085,11 +1085,6 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		if err != nil && c.failures[m.ID]+1 < maxMessageAttempts {
 			return nil, fmt.Errorf("%w: %w", bridgev2.ErrIgnoringRemoteEvent, err)
 		}
-		if err == nil {
-			for _, part := range converted.Parts {
-				cutOffLongText(c.login.Log, part.Content, maxMatrixContentBytes)
-			}
-		}
 		return converted, err
 	}
 	msg.ConvertEditFunc = func(ctx context.Context, p *bridgev2.Portal, intent bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
@@ -1109,14 +1104,12 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		}
 		for _, part := range converted.Parts {
 			if old := byID[part.ID]; old != nil {
-				cutOffLongText(c.login.Log, part.Content, maxMatrixContentBytes/2)
 				edit := part.ToEditPart(old)
 				if md, ok := part.DBMetadata.(*MessageMetadata); ok && md.Thread != nil {
 					edit.TopLevelExtra = map[string]any{"com.beeper.dont_render_edited": true}
 				}
 				result.ModifiedParts = append(result.ModifiedParts, edit)
 			} else {
-				cutOffLongText(c.login.Log, part.Content, maxMatrixContentBytes)
 				result.AddedParts.Parts = append(result.AddedParts.Parts, part)
 			}
 		}
