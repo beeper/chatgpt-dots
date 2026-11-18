@@ -320,7 +320,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 		}
 	}
 	var answers []pollAnswer
-	if existing == nil && m.Deleted == nil && m.Sender == state.DotMember {
+	if existing == nil && m.Deleted == nil && m.Sender == state.DotMember && len(confirmationQuestion(m)) <= maxPollQuestionBytes {
 		answers = confirmationPollAnswers(m.Content.Elicitation)
 	}
 	attachments := mappedAttachments(m, existing)

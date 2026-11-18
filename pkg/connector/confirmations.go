@@ -95,9 +95,6 @@ func confirmationPollAnswers(e *chatgpt.Elicitation) []pollAnswer {
 }
 
 func confirmationPoll(question string, answers []pollAnswer) map[string]any {
-	if runes := []rune(question); len(runes) > 1000 {
-		question = string(runes[:1000]) + "…"
-	}
 	options := make([]map[string]any, len(answers))
 	for i, answer := range answers {
 		options[i] = map[string]any{"id": answer.ID, "org.matrix.msc1767.text": answer.Label}
@@ -115,6 +112,8 @@ func isPollVoteOrEnd(part *database.Message) bool {
 }
 
 const pollEndPart networkid.PartID = "poll-end"
+
+const maxPollQuestionBytes = 4000
 
 func pollEndEdit(msg *simplevent.Message[chatgpt.Message], m chatgpt.Message, existing []*database.Message) bridgev2.RemoteEvent {
 	if m.Deleted != nil {
@@ -135,14 +134,13 @@ func pollEndEdit(msg *simplevent.Message[chatgpt.Message], m chatgpt.Message, ex
 	if poll == nil || len(confirmationPollAnswers(e)) > 0 && e.Definition() == poll.Metadata.(*MessageMetadata).Confirmation {
 		return nil
 	}
-	status := "closed"
+	text := "This confirmation changed; check it in ChatGPT"
 	if e != nil && e.Status != "" && e.Status != "pending" {
-		status = e.Status
+		text = "Confirmation status: " + e.Status
 	}
 	end := *msg
 	end.Type, end.PostHandleFunc, end.Timestamp = bridgev2.RemoteEventEdit, nil, ts
 	end.ConvertEditFunc = func(context.Context, *bridgev2.Portal, bridgev2.MatrixAPI, []*database.Message, chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
-		text := "Confirmation status: " + status
 		return &bridgev2.ConvertedEdit{AddedParts: &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{ID: pollEndPart, Type: event.EventUnstablePollEnd, Content: &event.MessageEventContent{Body: text, RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: poll.MXID}}, Extra: map[string]any{"org.matrix.msc3381.poll.end": map[string]any{}, "org.matrix.msc1767.text": text}, DBMetadata: &MessageMetadata{Updated: m.Updated}}}}}, nil
 	}
 	return &end
