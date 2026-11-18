@@ -262,6 +262,12 @@ func (c *Client) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev2.Matr
 			return err
 		}
 	}
+	for target != nil && isPollVoteOrEnd(target) {
+		var err error
+		if target, err = c.connector.bridge.DB.Message.GetLastNonFakePartAtOrBeforeTime(ctx, msg.Portal.PortalKey, target.Timestamp.Add(-time.Nanosecond)); err != nil {
+			return err
+		}
+	}
 	c.mu.RLock()
 	read := target != nil && target.Timestamp.After(state.HumanRead)
 	c.mu.RUnlock()

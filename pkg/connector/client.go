@@ -626,7 +626,7 @@ func (c *Client) HandleMatrixMembership(_ context.Context, msg *bridgev2.MatrixM
 	return nil, nil
 }
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
-	return &event.RoomFeatures{ID: "chatgpt-dots.audio-files.v1", ReadReceipts: true, ReactionCount: 1, Formatting: event.FormattingFeatureMap{
+	return &event.RoomFeatures{ID: "chatgpt-dots.confirmation-polls.v1", ReadReceipts: true, ReactionCount: 1, Formatting: event.FormattingFeatureMap{
 		event.FmtBold:          event.CapLevelFullySupported,
 		event.FmtItalic:        event.CapLevelFullySupported,
 		event.FmtStrikethrough: event.CapLevelFullySupported,
@@ -644,7 +644,7 @@ func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomF
 		"m.audio":         {MimeTypes: map[string]event.CapabilitySupportLevel{"audio/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		"m.video":         {MimeTypes: map[string]event.CapabilitySupportLevel{"video/*": event.CapLevelFullySupported}, Caption: event.CapLevelFullySupported, MaxSize: chatgpt.MaxUploadSize},
 		event.CapMsgVoice: {MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelRejected}},
-	}, Reply: event.CapLevelFullySupported, Thread: event.CapLevelFullySupported, Edit: event.CapLevelRejected, Delete: event.CapLevelRejected, Reaction: event.CapLevelFullySupported, Poll: event.CapLevelRejected, LocationMessage: event.CapLevelRejected}
+	}, Reply: event.CapLevelFullySupported, Thread: event.CapLevelFullySupported, Edit: event.CapLevelRejected, Delete: event.CapLevelRejected, Reaction: event.CapLevelFullySupported, Poll: event.CapLevelPartialSupport, PollMaxOptions: 1, LocationMessage: event.CapLevelRejected}
 }
 func revision(m chatgpt.Message) string {
 	return messageRevision(m, false)
@@ -879,6 +879,11 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 				c.rescanAfter[state.Profile.Room] = next
 			}
 			after = next
+		}
+		if recheck {
+			if err := c.refreshOpenPolls(ctx, state); err != nil {
+				return err
+			}
 		}
 		if err := c.refreshMessages(ctx, api, state); err != nil {
 			if !onlyMediaRetries(err) {
@@ -1118,6 +1123,9 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 			} else {
 				cutOffLongText(c.login.Log, part.Content, maxMatrixContentBytes)
 				result.AddedParts.Parts = append(result.AddedParts.Parts, part)
+				if part.ID == pollEndPart {
+					addedParts.ReplyTo, addedParts.ThreadRoot = nil, nil
+				}
 			}
 		}
 		return result, nil

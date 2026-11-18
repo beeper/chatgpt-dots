@@ -93,6 +93,13 @@ answered from Beeper; other requests link to the native ChatGPT interface.
 approval with `_meta.persist` `session` or `always`, only when the request lists
 that option.
 
+A request that can be answered from Beeper is bridged as a poll whose answer IDs
+are those command names. A vote runs the same checks and submission as the
+command and is refused once the poll has ended. The poll ends when ChatGPT marks
+the request resolved or expired; open polls are re-read whenever the bridge
+rechecks recent messages, including after a restart. Cards bridged before polls
+existed stay text and keep their commands.
+
 The login metadata reserves the decision before submission. Only a provider
 `applied` response is reported as confirmation. An ambiguous response remains
 reserved across restart and can be inspected without repeating the POST.

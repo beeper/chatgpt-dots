@@ -265,6 +265,10 @@ func expectedIncomingParts(m chatgpt.Message, existing []*database.Message) map[
 	for _, part := range existing {
 		if md, ok := part.Metadata.(*MessageMetadata); ok && (md.OutgoingMedia || !md.TextAnchor && strings.HasPrefix(string(part.PartID), "attachment-") && !links[part.PartID]) {
 			parts[part.PartID] = true
+		} else if isPollVoteOrEnd(part) {
+			parts[part.PartID] = true
+		} else if ok && len(md.PollOptions) > 0 && confirmationPollAnswers(m.Content.Elicitation) == nil {
+			parts[pollEndPart] = true
 		}
 	}
 	return parts
@@ -308,6 +312,22 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 	}
 	result := &bridgev2.ConvertedMessage{}
 	nativeReply(m, result)
+	polls := make(map[networkid.PartID]*database.Message)
+	for _, old := range existing {
+		if md, ok := old.Metadata.(*MessageMetadata); ok && len(md.PollOptions) > 0 {
+			polls[old.PartID] = old
+		}
+	}
+	if m.Deleted == nil && !current[pollEndPart] && expectedIncomingParts(m, existing)[pollEndPart] {
+		for _, poll := range polls {
+			status := "closed"
+			if e := m.Content.Elicitation; e != nil && e.Status != "" {
+				status = e.Status
+			}
+			result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: pollEndPart, Type: event.EventUnstablePollEnd, Content: &event.MessageEventContent{Body: "Confirmation status: " + status, RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: poll.MXID}}, Extra: map[string]any{"org.matrix.msc3381.poll.end": map[string]any{}, "org.matrix.msc1767.text": "Confirmation status: " + status}, DBMetadata: &MessageMetadata{Updated: m.Updated, Revision: revisions[pollEndPart]}})
+			break
+		}
+	}
 	attachments := mappedAttachments(m, existing)
 	caption := captionPart(m, attachments, existing)
 	if m.Deleted == nil && m.Content.Text == "" && m.Content.Elicitation == nil && len(attachments) == 0 {
@@ -321,7 +341,20 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 		if m.Deleted == nil && m.Sender == state.DotMember {
 			confirmation = m.Content.Elicitation.Definition()
 		}
-		result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Attachment: attachment, Media: media, Caption: attachment != nil && id == caption, Updated: m.Updated, Confirmation: confirmation, Revision: revisions[id], Thread: thread, TextAnchor: attachment == nil && m.Deleted == nil, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}})
+		part := &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Attachment: attachment, Media: media, Caption: attachment != nil && id == caption, Updated: m.Updated, Confirmation: confirmation, Revision: revisions[id], Thread: thread, TextAnchor: attachment == nil && m.Deleted == nil, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}}
+		if poll := polls[id]; poll != nil {
+			part.Type, part.DontBridge = event.EventUnstablePollStart, true
+			part.DBMetadata.(*MessageMetadata).PollOptions = poll.Metadata.(*MessageMetadata).PollOptions
+		} else if answers := confirmationPollAnswers(m.Content.Elicitation); existing == nil && confirmation != "" && attachment == nil && len(answers) > 0 {
+			options := make([]string, len(answers))
+			for i, answer := range answers {
+				options[i] = answer.ID
+			}
+			content.BeeperLinkPreviews = nil
+			part.Type, part.Extra = event.EventUnstablePollStart, confirmationPoll(confirmationQuestion(m), answers)
+			part.DBMetadata.(*MessageMetadata).PollOptions = options
+		}
+		result.Parts = append(result.Parts, part)
 	}
 	text := confirmationText(m, c.connector.bridge.Config.CommandPrefix)
 	if m.Deleted != nil || len(attachments) == 0 {

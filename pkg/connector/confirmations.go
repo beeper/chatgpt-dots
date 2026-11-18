@@ -12,6 +12,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
@@ -26,18 +27,23 @@ const confirmationRenderingVersion = 3
 
 var confirmationPersistence = map[string]string{"accept-conversation": "session", "accept-always": "always"}
 
-func confirmationText(m chatgpt.Message, prefix string) string {
-	e := m.Content.Elicitation
-	if e == nil || m.Deleted != nil {
-		return m.Content.Text
-	}
+func confirmationQuestion(m chatgpt.Message) string {
 	text := m.Content.Text
-	if summary := e.Summary(); summary != "" && summary != text {
+	if summary := m.Content.Elicitation.Summary(); summary != "" && summary != text {
 		if text != "" {
 			text += "\n\n"
 		}
 		text += summary
 	}
+	return text
+}
+
+func confirmationText(m chatgpt.Message, prefix string) string {
+	e := m.Content.Elicitation
+	if e == nil || m.Deleted != nil {
+		return m.Content.Text
+	}
+	text := confirmationQuestion(m)
 	if text != "" {
 		text += "\n\n"
 	}
@@ -60,6 +66,51 @@ func confirmationText(m chatgpt.Message, prefix string) string {
 	}
 	return text + fmt.Sprintf("To accept, send `%s accept %s` in this chat. To decline, send `%s decline %s`. Check status with `%s check %s`. You do not need to reply to this message.", prefix, code, prefix, code, prefix, code)
 }
+
+type pollAnswer struct {
+	ID    string
+	Label string
+}
+
+func confirmationPollAnswers(e *chatgpt.Elicitation) []pollAnswer {
+	if e == nil || e.Status != "" && e.Status != "pending" || !e.Binary() {
+		return nil
+	}
+	persist, ok := e.ToolApproval()
+	if !ok {
+		return []pollAnswer{{"accept", "Accept"}, {"decline", "Decline"}}
+	}
+	answers := []pollAnswer{{"accept", "Allow"}}
+	if len(persist) > 0 {
+		answers[0].Label = "Allow once"
+	}
+	if slices.Contains(persist, "session") {
+		answers = append(answers, pollAnswer{"accept-conversation", "Allow this conversation"})
+	}
+	if slices.Contains(persist, "always") {
+		answers = append(answers, pollAnswer{"accept-always", "Always allow"})
+	}
+	return append(answers, pollAnswer{"decline", "Deny"})
+}
+
+func confirmationPoll(question string, answers []pollAnswer) map[string]any {
+	options := make([]map[string]any, len(answers))
+	for i, answer := range answers {
+		options[i] = map[string]any{"id": answer.ID, "org.matrix.msc1767.text": answer.Label}
+	}
+	return map[string]any{"org.matrix.msc3381.poll.start": map[string]any{
+		"kind":           "org.matrix.msc3381.poll.disclosed",
+		"max_selections": 1,
+		"question":       map[string]any{"org.matrix.msc1767.text": question},
+		"answers":        options,
+	}}
+}
+
+func isPollVoteOrEnd(part *database.Message) bool {
+	return part.PartID == pollEndPart || strings.HasPrefix(string(part.PartID), "vote:")
+}
+
+const pollEndPart networkid.PartID = "poll-end"
 
 func (c *Connector) registerConfirmationCommands() error {
 	processor, ok := c.bridge.Commands.(*commands.Processor)
@@ -103,22 +154,28 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	if !ok {
 		return "", false, errors.New("This is not a ChatGPT Dots conversation")
 	}
-	client.waitForConnect(ce.Ctx)
-	client.sendMu.Lock()
-	defer client.sendMu.Unlock()
-	client.mu.RLock()
-	api, run := client.api, client.runContext
-	room := client.meta.Rooms[string(ce.Portal.ID)]
-	client.mu.RUnlock()
-	if api == nil || run == nil || run.Err() != nil || !client.IsLoggedIn() || room == nil || login.Client != client {
+	return client.answerConfirmation(ce.Ctx, ce.Portal, ce.EventID, ce.Command, func(ctx context.Context) (*database.Message, error) {
+		return c.confirmationTarget(ctx, ce)
+	})
+}
+
+func (c *Client) answerConfirmation(parent context.Context, portal *bridgev2.Portal, eventID id.EventID, command string, findTarget func(context.Context) (*database.Message, error)) (string, bool, error) {
+	c.waitForConnect(parent)
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	c.mu.RLock()
+	api, run := c.api, c.runContext
+	room := c.meta.Rooms[string(portal.ID)]
+	c.mu.RUnlock()
+	if api == nil || run == nil || run.Err() != nil || !c.IsLoggedIn() || room == nil || c.login.Client != c {
 		return "", false, errors.New("Reconnect this Dot before answering its confirmation")
 	}
-	ctx, cancel := context.WithTimeout(ce.Ctx, 45*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
 	stop := context.AfterFunc(run, cancel)
 	defer stop()
-	target, err := c.confirmationTarget(ctx, ce)
-	if err != nil || target == nil || target.Room != client.key(room) || target.SenderID != client.dotID(room) || target.HasFakeMXID() {
+	target, err := findTarget(ctx)
+	if err != nil || target == nil || target.Room != c.key(room) || target.SenderID != c.dotID(room) || target.HasFakeMXID() {
 		return "", false, errors.New("Use the exact confirmation command shown on the card in this conversation")
 	}
 	metadata, ok := target.Metadata.(*MessageMetadata)
@@ -141,10 +198,10 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 		return "", false, errors.New("This confirmation changed; use the updated card or open ChatGPT")
 	}
 	key := room.Profile.Room + "\x00" + string(target.ID) + "\x00" + metadata.Confirmation
-	client.mu.RLock()
-	previous, reserved := client.meta.Confirmations[key]
-	client.mu.RUnlock()
-	if ce.Command == "check" {
+	c.mu.RLock()
+	previous, reserved := c.meta.Confirmations[key]
+	c.mu.RUnlock()
+	if command == "check" {
 		if reserved && previous.Applied {
 			return "ChatGPT confirmed this decision: " + previous.Action + ".", false, nil
 		}
@@ -153,16 +210,16 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 		}
 		return "ChatGPT reports this confirmation as " + observed.Runtime + ".", false, nil
 	}
-	persist, remembered := confirmationPersistence[ce.Command]
-	if ce.Command != "accept" && ce.Command != "decline" && !remembered {
+	persist, remembered := confirmationPersistence[command]
+	if command != "accept" && command != "decline" && !remembered {
 		return "", false, errors.New("Unknown confirmation command")
 	}
-	action := ce.Command
+	action := command
 	if remembered {
 		action = "accept"
 	}
 	if reserved {
-		if previous.Action == ce.Command && previous.Applied {
+		if previous.Action == command && previous.Applied {
 			return "ChatGPT already confirmed this decision: " + previous.Action + ".", false, nil
 		}
 		return "", !previous.Applied, errors.New("A decision was already submitted for this confirmation; check its status in ChatGPT")
@@ -174,6 +231,7 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 		return "", false, errors.New("This confirmation does not offer that option; use a command shown on the card")
 	}
 	if !observed.CanRespond || observed.Runtime != "pending" || observed.Elicitation.Status != "" && observed.Elicitation.Status != "pending" {
+		c.requestRefresh(room.Profile.Room, string(target.ID), true)
 		return "", false, errors.New("This confirmation is no longer waiting for a response; check it in ChatGPT")
 	}
 	if err = ctx.Err(); err != nil {
@@ -181,17 +239,17 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	}
 	// Persist before the external side effect. Ambiguous results can only be
 	// inspected, never automatically re-submitted after a retry or restart.
-	client.mu.Lock()
-	if client.meta.Confirmations == nil {
-		client.meta.Confirmations = make(map[string]ConfirmationAction)
+	c.mu.Lock()
+	if c.meta.Confirmations == nil {
+		c.meta.Confirmations = make(map[string]ConfirmationAction)
 	}
-	operation := ConfirmationAction{EventID: ce.EventID, Action: ce.Command}
-	client.meta.Confirmations[key] = operation
-	err = login.Save(ctx)
+	operation := ConfirmationAction{EventID: eventID, Action: command}
+	c.meta.Confirmations[key] = operation
+	err = c.login.Save(ctx)
 	if err != nil {
-		delete(client.meta.Confirmations, key)
+		delete(c.meta.Confirmations, key)
 	}
-	client.mu.Unlock()
+	c.mu.Unlock()
 	if err != nil {
 		return "", false, errors.New("Could not save the confirmation decision; nothing submitted")
 	}
@@ -199,20 +257,20 @@ func (c *Connector) runConfirmationCommand(ce *commands.Event) (string, bool, er
 	if err != nil || !applied {
 		return "", true, errors.New("ChatGPT did not confirm this decision")
 	}
-	client.mu.Lock()
+	c.mu.Lock()
 	operation.Applied = true
-	client.meta.Confirmations[key] = operation
-	err = login.Save(ctx)
+	c.meta.Confirmations[key] = operation
+	err = c.login.Save(ctx)
 	if err != nil {
 		operation.Applied = false
-		client.meta.Confirmations[key] = operation
+		c.meta.Confirmations[key] = operation
 	}
-	client.mu.Unlock()
+	c.mu.Unlock()
 	if err != nil {
 		return "", true, errors.New("Could not save ChatGPT's confirmation acknowledgement")
 	}
-	client.requestRefresh(room.Profile.Room, string(target.ID), true)
-	return "ChatGPT confirmed this decision: " + ce.Command + ".", false, nil
+	c.requestRefresh(room.Profile.Room, string(target.ID), true)
+	return "ChatGPT confirmed this decision: " + command + ".", false, nil
 }
 
 func (c *Connector) confirmationTarget(ctx context.Context, ce *commands.Event) (*database.Message, error) {
@@ -256,4 +314,67 @@ func (c *Connector) confirmationTarget(ctx context.Context, ce *commands.Event) 
 		}
 	}
 	return target, nil
+}
+
+func (c *Client) HandleMatrixPollStart(context.Context, *bridgev2.MatrixPollStart) (*bridgev2.MatrixMessageResponse, error) {
+	return nil, bridgev2.ErrPollsNotSupported
+}
+
+func (c *Client) HandleMatrixPollVote(ctx context.Context, msg *bridgev2.MatrixPollVote) (*bridgev2.MatrixMessageResponse, error) {
+	message, uncertain, err := c.runConfirmationVote(ctx, msg)
+	if err == nil {
+		return &bridgev2.MatrixMessageResponse{DB: &database.Message{ID: msg.VoteTo.ID, PartID: networkid.PartID("vote:" + msg.Event.ID), SenderID: c.GetUserID(), Metadata: &MessageMetadata{}}}, nil
+	}
+	message = err.Error()
+	if uncertain {
+		message = "ChatGPT has not confirmed this decision. It will not be sent again automatically. Check it in ChatGPT."
+	}
+	return nil, bridgev2.WrapErrorInStatus(errors.New(message)).WithMessage(message).WithIsCertain(!uncertain).WithSendNotice(true).WithStatus(event.MessageStatusFail)
+}
+
+func (c *Client) runConfirmationVote(ctx context.Context, msg *bridgev2.MatrixPollVote) (string, bool, error) {
+	metadata, _ := msg.VoteTo.Metadata.(*MessageMetadata)
+	answers := msg.Content.Response.Answers
+	if metadata == nil || len(metadata.PollOptions) == 0 || isPollVoteOrEnd(msg.VoteTo) {
+		return "", false, errors.New("This poll can't be answered from Beeper")
+	} else if len(answers) != 1 || !slices.Contains(metadata.PollOptions, answers[0]) {
+		return "", false, errors.New("Choose one option to answer this confirmation")
+	} else if msg.Portal.Receiver != c.login.ID || msg.Event.Sender != c.login.UserMXID {
+		return "", false, errors.New("This confirmation belongs to another account")
+	}
+	ended, err := c.connector.bridge.DB.Message.GetPartByID(ctx, c.login.ID, msg.VoteTo.ID, pollEndPart)
+	if err != nil {
+		return "", false, err
+	} else if ended != nil {
+		return "", false, errors.New("This confirmation is no longer waiting for a response; check it in ChatGPT")
+	}
+	return c.answerConfirmation(ctx, msg.Portal, msg.Event.ID, answers[0], func(context.Context) (*database.Message, error) {
+		return msg.VoteTo, nil
+	})
+}
+
+var _ bridgev2.PollHandlingNetworkAPI = (*Client)(nil)
+
+func (c *Client) refreshOpenPolls(ctx context.Context, state *RoomState) error {
+	rows, err := c.connector.bridge.DB.Message.GetDB().Query(ctx, `SELECT id FROM message p WHERE bridge_id=$1 AND room_id=$2 AND room_receiver=$3 AND metadata->>'poll_options' IS NOT NULL AND NOT EXISTS (SELECT 1 FROM message e WHERE e.bridge_id=p.bridge_id AND e.room_receiver=p.room_receiver AND e.id=p.id AND e.part_id=$4)`, c.connector.bridge.ID, state.Profile.Room, c.login.ID, pollEndPart)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return err
+		}
+		if c.refresh == nil {
+			c.refresh = make(map[string]map[string]bool)
+		}
+		if c.refresh[state.Profile.Room] == nil {
+			c.refresh[state.Profile.Room] = make(map[string]bool)
+		}
+		c.refresh[state.Profile.Room][id] = true
+	}
+	return rows.Err()
 }
