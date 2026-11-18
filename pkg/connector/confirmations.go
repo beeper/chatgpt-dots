@@ -13,6 +13,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
@@ -94,6 +95,9 @@ func confirmationPollAnswers(e *chatgpt.Elicitation) []pollAnswer {
 }
 
 func confirmationPoll(question string, answers []pollAnswer) map[string]any {
+	if runes := []rune(question); len(runes) > 1000 {
+		question = string(runes[:1000]) + "…"
+	}
 	options := make([]map[string]any, len(answers))
 	for i, answer := range answers {
 		options[i] = map[string]any{"id": answer.ID, "org.matrix.msc1767.text": answer.Label}
@@ -111,6 +115,38 @@ func isPollVoteOrEnd(part *database.Message) bool {
 }
 
 const pollEndPart networkid.PartID = "poll-end"
+
+func pollEndEdit(msg *simplevent.Message[chatgpt.Message], m chatgpt.Message, existing []*database.Message) bridgev2.RemoteEvent {
+	if m.Deleted != nil {
+		return nil
+	}
+	var poll *database.Message
+	ts := m.Updated
+	for _, part := range existing {
+		if part.PartID == pollEndPart {
+			return nil
+		} else if md, ok := part.Metadata.(*MessageMetadata); ok && len(md.PollOptions) > 0 {
+			poll = part
+		} else if isPollVoteOrEnd(part) && !part.Timestamp.Before(ts) {
+			ts = part.Timestamp.Add(time.Millisecond)
+		}
+	}
+	e := m.Content.Elicitation
+	if poll == nil || len(confirmationPollAnswers(e)) > 0 && e.Definition() == poll.Metadata.(*MessageMetadata).Confirmation {
+		return nil
+	}
+	status := "closed"
+	if e != nil && e.Status != "" && e.Status != "pending" {
+		status = e.Status
+	}
+	end := *msg
+	end.Type, end.PostHandleFunc, end.Timestamp = bridgev2.RemoteEventEdit, nil, ts
+	end.ConvertEditFunc = func(context.Context, *bridgev2.Portal, bridgev2.MatrixAPI, []*database.Message, chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
+		text := "Confirmation status: " + status
+		return &bridgev2.ConvertedEdit{AddedParts: &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{ID: pollEndPart, Type: event.EventUnstablePollEnd, Content: &event.MessageEventContent{Body: text, RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: poll.MXID}}, Extra: map[string]any{"org.matrix.msc3381.poll.end": map[string]any{}, "org.matrix.msc1767.text": text}, DBMetadata: &MessageMetadata{Updated: m.Updated}}}}}, nil
+	}
+	return &end
+}
 
 func (c *Connector) registerConfirmationCommands() error {
 	processor, ok := c.bridge.Commands.(*commands.Processor)
@@ -323,7 +359,7 @@ func (c *Client) HandleMatrixPollStart(context.Context, *bridgev2.MatrixPollStar
 func (c *Client) HandleMatrixPollVote(ctx context.Context, msg *bridgev2.MatrixPollVote) (*bridgev2.MatrixMessageResponse, error) {
 	message, uncertain, err := c.runConfirmationVote(ctx, msg)
 	if err == nil {
-		return &bridgev2.MatrixMessageResponse{DB: &database.Message{ID: msg.VoteTo.ID, PartID: networkid.PartID("vote:" + msg.Event.ID), SenderID: c.GetUserID(), Metadata: &MessageMetadata{}}}, nil
+		return &bridgev2.MatrixMessageResponse{DB: &database.Message{ID: msg.VoteTo.ID, PartID: networkid.PartID("vote:" + msg.Event.ID), SenderID: c.GetUserID(), SenderMXID: msg.VoteTo.SenderMXID, Metadata: &MessageMetadata{}}}, nil
 	}
 	message = err.Error()
 	if uncertain {

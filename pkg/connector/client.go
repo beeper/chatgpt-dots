@@ -1123,9 +1123,6 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 			} else {
 				cutOffLongText(c.login.Log, part.Content, maxMatrixContentBytes)
 				result.AddedParts.Parts = append(result.AddedParts.Parts, part)
-				if part.ID == pollEndPart {
-					addedParts.ReplyTo, addedParts.ThreadRoot = nil, nil
-				}
 			}
 		}
 		return result, nil
@@ -1159,21 +1156,25 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 				}
 			}
 		}
-		if incomingSaved(m, existing) {
-			return bridgev2.UpsertResult{}, nil
-		}
-		edit := *msg
-		edit.Type = bridgev2.RemoteEventEdit
-		edit.PostHandleFunc = nil
-		if !m.Updated.IsZero() {
-			edit.Timestamp = m.Updated
-		}
-		for _, thread := range m.Threads {
-			if thread != nil && time.Unix(thread.UpdatedAt, 0).After(edit.Timestamp) {
-				edit.Timestamp = time.Unix(thread.UpdatedAt, 0)
+		var result bridgev2.UpsertResult
+		if !incomingSaved(m, existing) {
+			edit := *msg
+			edit.Type = bridgev2.RemoteEventEdit
+			edit.PostHandleFunc = nil
+			if !m.Updated.IsZero() {
+				edit.Timestamp = m.Updated
 			}
+			for _, thread := range m.Threads {
+				if thread != nil && time.Unix(thread.UpdatedAt, 0).After(edit.Timestamp) {
+					edit.Timestamp = time.Unix(thread.UpdatedAt, 0)
+				}
+			}
+			result.SubEvents = append(result.SubEvents, &edit)
 		}
-		return bridgev2.UpsertResult{SubEvents: []bridgev2.RemoteEvent{&edit}}, nil
+		if end := pollEndEdit(msg, m, existing); end != nil {
+			result.SubEvents = append(result.SubEvents, end)
+		}
+		return result, nil
 	}
 	conversionFailure := func() error {
 		if ctx.Err() != nil {

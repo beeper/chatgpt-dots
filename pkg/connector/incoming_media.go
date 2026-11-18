@@ -242,6 +242,11 @@ func textPartID(m chatgpt.Message, existing []*database.Message) networkid.PartI
 func expectedIncomingParts(m chatgpt.Message, existing []*database.Message) map[networkid.PartID]bool {
 	parts := make(map[networkid.PartID]bool)
 	attachments := mappedAttachments(m, existing)
+	for _, part := range existing {
+		if isPollVoteOrEnd(part) {
+			parts[part.PartID] = true
+		}
+	}
 	if m.Deleted != nil {
 		parts["deleted"] = true
 		return parts
@@ -265,10 +270,6 @@ func expectedIncomingParts(m chatgpt.Message, existing []*database.Message) map[
 	for _, part := range existing {
 		if md, ok := part.Metadata.(*MessageMetadata); ok && (md.OutgoingMedia || !md.TextAnchor && strings.HasPrefix(string(part.PartID), "attachment-") && !links[part.PartID]) {
 			parts[part.PartID] = true
-		} else if isPollVoteOrEnd(part) {
-			parts[part.PartID] = true
-		} else if ok && len(md.PollOptions) > 0 && confirmationPollAnswers(m.Content.Elicitation) == nil {
-			parts[pollEndPart] = true
 		}
 	}
 	return parts
@@ -318,15 +319,9 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			polls[old.PartID] = old
 		}
 	}
-	if m.Deleted == nil && !current[pollEndPart] && expectedIncomingParts(m, existing)[pollEndPart] {
-		for _, poll := range polls {
-			status := "closed"
-			if e := m.Content.Elicitation; e != nil && e.Status != "" {
-				status = e.Status
-			}
-			result.Parts = append(result.Parts, &bridgev2.ConvertedMessagePart{ID: pollEndPart, Type: event.EventUnstablePollEnd, Content: &event.MessageEventContent{Body: "Confirmation status: " + status, RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: poll.MXID}}, Extra: map[string]any{"org.matrix.msc3381.poll.end": map[string]any{}, "org.matrix.msc1767.text": "Confirmation status: " + status}, DBMetadata: &MessageMetadata{Updated: m.Updated, Revision: revisions[pollEndPart]}})
-			break
-		}
+	var answers []pollAnswer
+	if existing == nil && m.Deleted == nil && m.Sender == state.DotMember {
+		answers = confirmationPollAnswers(m.Content.Elicitation)
 	}
 	attachments := mappedAttachments(m, existing)
 	caption := captionPart(m, attachments, existing)
@@ -343,14 +338,15 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 		}
 		part := &bridgev2.ConvertedMessagePart{ID: id, Type: event.EventMessage, Content: content, DBMetadata: &MessageMetadata{Attachment: attachment, Media: media, Caption: attachment != nil && id == caption, Updated: m.Updated, Confirmation: confirmation, Revision: revisions[id], Thread: thread, TextAnchor: attachment == nil && m.Deleted == nil, OutgoingMedia: id == "" && outgoingMediaAnchor(existing) && m.Deleted == nil}}
 		if poll := polls[id]; poll != nil {
+			md := poll.Metadata.(*MessageMetadata)
 			part.Type, part.DontBridge = event.EventUnstablePollStart, true
-			part.DBMetadata.(*MessageMetadata).PollOptions = poll.Metadata.(*MessageMetadata).PollOptions
-		} else if answers := confirmationPollAnswers(m.Content.Elicitation); existing == nil && confirmation != "" && attachment == nil && len(answers) > 0 {
+			part.DBMetadata.(*MessageMetadata).PollOptions = md.PollOptions
+			part.DBMetadata.(*MessageMetadata).Confirmation = md.Confirmation
+		} else if attachment == nil && len(answers) > 0 {
 			options := make([]string, len(answers))
 			for i, answer := range answers {
 				options[i] = answer.ID
 			}
-			content.BeeperLinkPreviews = nil
 			part.Type, part.Extra = event.EventUnstablePollStart, confirmationPoll(confirmationQuestion(m), answers)
 			part.DBMetadata.(*MessageMetadata).PollOptions = options
 		}
@@ -366,7 +362,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			content := renderText(text)
 			if m.Deleted != nil {
 				content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "[Message deleted in ChatGPT]"}
-			} else {
+			} else if polls[partID] == nil && len(answers) == 0 {
 				content.BeeperLinkPreviews = c.linkPreviews(ctx, api, portal, intent, m)
 			}
 			add(partID, content, nil, nil, nil)
@@ -377,7 +373,9 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 		for _, old := range existing {
 			if md, ok := old.Metadata.(*MessageMetadata); ok && md.TextAnchor && old.PartID == caption {
 				content := renderText(text)
-				content.BeeperLinkPreviews = c.linkPreviews(ctx, api, portal, intent, m)
+				if polls[caption] == nil {
+					content.BeeperLinkPreviews = c.linkPreviews(ctx, api, portal, intent, m)
+				}
 				add(caption, content, nil, nil, nil)
 				break
 			}
