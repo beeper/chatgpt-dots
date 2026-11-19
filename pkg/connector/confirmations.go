@@ -141,9 +141,32 @@ func pollEndEdit(msg *simplevent.Message[chatgpt.Message], m chatgpt.Message, ex
 	end := *msg
 	end.Type, end.PostHandleFunc, end.Timestamp = bridgev2.RemoteEventEdit, nil, ts
 	end.ConvertEditFunc = func(context.Context, *bridgev2.Portal, bridgev2.MatrixAPI, []*database.Message, chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
-		return &bridgev2.ConvertedEdit{AddedParts: &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{ID: pollEndPart, Type: event.EventUnstablePollEnd, Content: &event.MessageEventContent{Body: text, RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: poll.MXID}}, Extra: map[string]any{"org.matrix.msc3381.poll.end": map[string]any{}, "org.matrix.msc1767.text": text}, DBMetadata: &MessageMetadata{Updated: m.Updated}}}}}, nil
+		return pollEnd(poll, text, m.Updated), nil
 	}
 	return &end
+}
+
+func pollEnd(poll *database.Message, text string, updated time.Time) *bridgev2.ConvertedEdit {
+	return &bridgev2.ConvertedEdit{AddedParts: &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{ID: pollEndPart, Type: event.EventUnstablePollEnd, Content: &event.MessageEventContent{Body: text, RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: poll.MXID}}, Extra: map[string]any{"org.matrix.msc3381.poll.end": map[string]any{}, "org.matrix.msc1767.text": text}, DBMetadata: &MessageMetadata{Updated: updated}}}}}
+}
+
+func (c *Client) endClosedPoll(room *RoomState, target *database.Message, runtime string) {
+	evt := &simplevent.Message[chatgpt.Message]{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventEdit, PortalKey: c.key(room), Sender: bridgev2.EventSender{Sender: c.dotID(room)}, Timestamp: time.Now()}, ID: target.ID, TargetMessage: target.ID}
+	evt.ConvertEditFunc = func(_ context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
+		var poll *database.Message
+		for _, part := range existing {
+			if part.PartID == pollEndPart {
+				return &bridgev2.ConvertedEdit{}, nil
+			} else if md, ok := part.Metadata.(*MessageMetadata); ok && len(md.PollOptions) > 0 {
+				poll = part
+			}
+		}
+		if poll == nil {
+			return &bridgev2.ConvertedEdit{}, nil
+		}
+		return pollEnd(poll, "Confirmation status: "+runtime, time.Time{}), nil
+	}
+	go c.login.QueueRemoteEvent(evt)
 }
 
 func (c *Connector) registerConfirmationCommands() error {
@@ -265,6 +288,9 @@ func (c *Client) answerConfirmation(parent context.Context, portal *bridgev2.Por
 		return "", false, errors.New("This confirmation does not offer that option; use a command shown on the card")
 	}
 	if !observed.CanRespond || observed.Runtime != "pending" || observed.Elicitation.Status != "" && observed.Elicitation.Status != "pending" {
+		if observed.Runtime != "pending" {
+			c.endClosedPoll(room, target, observed.Runtime)
+		}
 		c.requestRefresh(room.Profile.Room, string(target.ID), true)
 		return "", false, errors.New("This confirmation is no longer waiting for a response; check it in ChatGPT")
 	}
