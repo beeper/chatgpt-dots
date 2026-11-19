@@ -415,19 +415,36 @@ func (c *Client) runConfirmationVote(ctx context.Context, msg *bridgev2.MatrixPo
 
 var _ bridgev2.PollHandlingNetworkAPI = (*Client)(nil)
 
-func (c *Client) refreshOpenPolls(ctx context.Context, state *RoomState) error {
-	rows, err := c.connector.bridge.DB.Message.GetDB().Query(ctx, `SELECT id FROM message p WHERE bridge_id=$1 AND room_id=$2 AND room_receiver=$3 AND metadata->>'poll_options' IS NOT NULL AND NOT EXISTS (SELECT 1 FROM message e WHERE e.bridge_id=p.bridge_id AND e.room_receiver=p.room_receiver AND e.id=p.id AND e.part_id=$4)`, c.connector.bridge.ID, state.Profile.Room, c.login.ID, pollEndPart)
+func (c *Client) refreshOpenPolls(ctx context.Context, api *chatgpt.Client, state *RoomState) error {
+	rows, err := c.connector.bridge.DB.Message.GetDB().Query(ctx, `SELECT id, metadata->>'confirmation' FROM message p WHERE bridge_id=$1 AND room_id=$2 AND room_receiver=$3 AND metadata->>'poll_options' IS NOT NULL AND NOT EXISTS (SELECT 1 FROM message e WHERE e.bridge_id=p.bridge_id AND e.room_receiver=p.room_receiver AND e.id=p.id AND e.part_id=$4)`, c.connector.bridge.ID, state.Profile.Room, c.login.ID, pollEndPart)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
+	polls := make(map[string]string)
 	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
+		var id, confirmation string
+		if err = rows.Scan(&id, &confirmation); err != nil {
+			rows.Close()
 			return err
 		}
+		polls[id] = confirmation
+	}
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for id, confirmation := range polls {
+		observed, err := api.ReadElicitation(ctx, state.Profile.Room, id)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		} else if err != nil {
+			c.login.Log.Debug().Err(err).Str("message_id", id).Msg("Could not check an open confirmation poll")
+		} else if observed.Runtime != "pending" {
+			c.endClosedPoll(state, &database.Message{ID: networkid.MessageID(id)}, observed.Runtime)
+			continue
+		} else if observed.Elicitation.Definition() == confirmation && (observed.Elicitation.Status == "" || observed.Elicitation.Status == "pending") {
+			continue
+		}
+		c.refreshMu.Lock()
 		if c.refresh == nil {
 			c.refresh = make(map[string]map[string]bool)
 		}
@@ -435,6 +452,7 @@ func (c *Client) refreshOpenPolls(ctx context.Context, state *RoomState) error {
 			c.refresh[state.Profile.Room] = make(map[string]bool)
 		}
 		c.refresh[state.Profile.Room][id] = true
+		c.refreshMu.Unlock()
 	}
-	return rows.Err()
+	return nil
 }

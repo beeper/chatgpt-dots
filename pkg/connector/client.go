@@ -881,7 +881,7 @@ func (c *Client) poll(ctx context.Context, api *chatgpt.Client) (err error) {
 			after = next
 		}
 		if recheck {
-			if err := c.refreshOpenPolls(ctx, state); err != nil {
+			if err := c.refreshOpenPolls(ctx, api, state); err != nil {
 				return err
 			}
 		}
