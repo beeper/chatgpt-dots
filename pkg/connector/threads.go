@@ -135,6 +135,11 @@ func threadBody(thread *chatgpt.ThreadStatus) string {
 func incomingRevisions(m chatgpt.Message, existing []*database.Message) map[networkid.PartID]string {
 	result := incomingRevisionsWithBase(m, existing, revision(m))
 	attachments := mappedAttachments(m, existing)
+	for _, old := range existing {
+		if md, ok := old.Metadata.(*MessageMetadata); ok && isPollVoteOrEnd(old) {
+			result[old.PartID] = md.Revision
+		}
+	}
 	if m.Deleted != nil {
 		return result
 	}

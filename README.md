@@ -15,7 +15,7 @@ protocol can interrupt the connection.
 - Emoji reactions in both directions, with one reaction per person per message.
 - Images, files and videos in both directions, with a bridge-local 20 MiB limit.
 - Task cards whose titles and status update in place.
-- Confirmation cards with explicit accept, decline and status commands.
+- Confirmation cards as polls, with accept, decline and status commands as a fallback.
 - Incoming typing indicators.
 - Read receipts in both directions, including chats read in ChatGPT.
 - Separate Dot and account avatars, account profile refresh and session renewal.
@@ -27,7 +27,10 @@ voice notes and sending typing are
 not supported. Some native message formats remain unsupported. See the
 [setup guide](docs/README.md) to run a standalone instance.
 
-When a Dot asks for confirmation, the card includes a command such as
+When a Dot asks for confirmation, the card is a poll with the options ChatGPT
+offers, such as Allow once, Allow this conversation, Always allow and Deny. Voting
+sends that decision, and the poll ends once the request is answered anywhere or
+expires. The card also includes a command such as
 `!dots accept a1b2c3d4e5f6`. Send that command in the chat to accept, or use
 `!dots decline a1b2c3d4e5f6` to decline. `!dots check a1b2c3d4e5f6` reads its
 status. Tool approvals, such as letting the Dot use an app or download from a
