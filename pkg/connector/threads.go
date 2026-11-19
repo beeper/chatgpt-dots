@@ -80,7 +80,6 @@ func (c *Client) bridgeTaskItems(ctx context.Context, api *chatgpt.Client, watch
 				timestamp = time.Now()
 			}
 			content := renderText(item.Text)
-			cutOffLongText(c.login.Log, content, maxMatrixContentBytes)
 			result := c.login.QueueRemoteEvent(&simplevent.PreConvertedMessage{
 				EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventMessage, PortalKey: c.key(watch.Room), Sender: sender, Timestamp: timestamp},
 				ID:        id,
