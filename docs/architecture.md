@@ -100,6 +100,14 @@ the request resolved or expired; open polls are re-read whenever the bridge
 rechecks recent messages, including after a restart. Cards bridged before polls
 existed stay text and keep their commands.
 
+A request whose only form field is a fixed choice (a string `enum`, `oneOf` or
+`anyOf` of constants, or a boolean) is a poll with one answer per option plus
+Decline; a vote accepts the request with that field set. A Dot message with
+`message_metadata.option_picker.options` is a poll too. A vote sends the chosen
+option as a reply carrying `option_picker.selection`, the same message ChatGPT's
+app sends, once and without retry. Those replies are hidden like in ChatGPT, and
+the poll ends when one exists or the picker's `selected` is set.
+
 The login metadata reserves the decision before submission. Only a provider
 `applied` response is reported as confirmation. An ambiguous response remains
 reserved across restart and can be inspected without repeating the POST.

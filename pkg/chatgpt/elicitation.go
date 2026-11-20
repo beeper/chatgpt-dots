@@ -41,31 +41,38 @@ func (e *Elicitation) Binary() bool {
 	return ok
 }
 
-func (e *Elicitation) AcceptContent() (map[string]any, bool) {
-	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" {
-		return nil, false
-	}
-	if _, ok := e.ToolApproval(); ok {
-		return map[string]any{}, true
-	}
-	if e.Params.Server == "browser" || e.Params.Server == "browser-use" {
-		return nil, false
+type formSchema struct {
+	Type       string                     `json:"type"`
+	Properties map[string]json.RawMessage `json:"properties"`
+	Required   []string                   `json:"required"`
+}
+
+func (e *Elicitation) form(allowedMeta ...string) (map[string]json.RawMessage, *formSchema, bool) {
+	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" || e.Params.Server == "browser" || e.Params.Server == "browser-use" {
+		return nil, nil, false
 	}
 	var meta map[string]json.RawMessage
 	if len(e.Params.Meta) != 0 && json.Unmarshal(e.Params.Meta, &meta) != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	for key := range meta {
-		if key != "reason" && key != "openai/confirmation" {
-			return nil, false
+		if !slices.Contains(allowedMeta, key) {
+			return nil, nil, false
 		}
 	}
-	var schema struct {
-		Type       string                     `json:"type"`
-		Properties map[string]json.RawMessage `json:"properties"`
-		Required   []string                   `json:"required"`
-	}
+	var schema formSchema
 	if json.Unmarshal(e.Params.Schema, &schema) != nil || schema.Type != "object" || schema.Properties == nil {
+		return nil, nil, false
+	}
+	return meta, &schema, true
+}
+
+func (e *Elicitation) AcceptContent() (map[string]any, bool) {
+	if _, ok := e.ToolApproval(); ok {
+		return map[string]any{}, true
+	}
+	meta, schema, ok := e.form("reason", "openai/confirmation")
+	if !ok {
 		return nil, false
 	}
 	if len(schema.Properties) == 0 && len(schema.Required) == 0 {
@@ -96,27 +103,8 @@ type Choice struct {
 }
 
 func (e *Elicitation) Choices() (string, []Choice, bool) {
-	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" || e.Binary() {
-		return "", nil, false
-	}
-	if e.Params.Server == "browser" || e.Params.Server == "browser-use" {
-		return "", nil, false
-	}
-	var meta map[string]json.RawMessage
-	if len(e.Params.Meta) != 0 && json.Unmarshal(e.Params.Meta, &meta) != nil {
-		return "", nil, false
-	}
-	for key := range meta {
-		if key != "reason" {
-			return "", nil, false
-		}
-	}
-	var schema struct {
-		Type       string                     `json:"type"`
-		Properties map[string]json.RawMessage `json:"properties"`
-		Required   []string                   `json:"required"`
-	}
-	if json.Unmarshal(e.Params.Schema, &schema) != nil || schema.Type != "object" || len(schema.Properties) != 1 {
+	_, schema, ok := e.form("reason")
+	if !ok || len(schema.Properties) != 1 || e.Binary() {
 		return "", nil, false
 	}
 	var name string
@@ -170,7 +158,7 @@ func (e *Elicitation) Choices() (string, []Choice, bool) {
 		for _, raw := range append(field.OneOf, field.AnyOf...) {
 			var option map[string]json.RawMessage
 			var value, title string
-			if json.Unmarshal(raw, &option) != nil || json.Unmarshal(option["const"], &value) != nil {
+			if json.Unmarshal(raw, &option) != nil || !strings.HasPrefix(string(option["const"]), `"`) || json.Unmarshal(option["const"], &value) != nil {
 				return "", nil, false
 			}
 			for key := range option {

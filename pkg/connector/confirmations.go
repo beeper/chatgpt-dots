@@ -56,7 +56,12 @@ func confirmationText(m chatgpt.Message, prefix string) string {
 	if e.Status != "" && e.Status != "pending" {
 		return text + "Confirmation status: " + e.Status
 	}
-	if !e.Binary() {
+	if _, choices, ok := e.Choices(); ok {
+		for i, choice := range choices {
+			text += fmt.Sprintf("%d. %s\n", i+1, choice.Label)
+		}
+		return text + "\nAnswer it in the poll or in ChatGPT: https://chatgpt.com/dots/home"
+	} else if !e.Binary() {
 		return text + "This request needs the ChatGPT interface: https://chatgpt.com/dots/home"
 	}
 	code := e.Definition()[:12]
@@ -171,12 +176,12 @@ func pollEndEdit(msg *simplevent.Message[chatgpt.Message], m chatgpt.Message, ex
 	text := "This confirmation changed; check it in ChatGPT"
 	if definition := poll.Metadata.(*MessageMetadata).OptionPicker; definition != "" {
 		picker, ok := m.OptionPicker()
-		if !ok || optionPickerDefinition(picker) != definition {
+		if !ok || optionPickerDefinition(m, picker) != definition {
 			text = "This question changed; check it in ChatGPT"
 		} else if picker.Selected == nil {
 			return nil
 		} else {
-			text = optionPickerOutcome(picker)
+			text = selectedOption(picker)
 		}
 	} else if len(confirmationPollAnswers(e)) > 0 && e.Definition() == poll.Metadata.(*MessageMetadata).Confirmation {
 		return nil
@@ -308,7 +313,7 @@ func (c *Client) answerConfirmation(parent context.Context, portal *bridgev2.Por
 	c.mu.RUnlock()
 	if command == "check" {
 		if reserved && previous.Applied {
-			return "ChatGPT confirmed this decision: " + previous.Action + ".", false, nil
+			return "ChatGPT confirmed this decision: " + decisionName(observed.Elicitation, previous.Action) + ".", false, nil
 		}
 		if reserved {
 			return "ChatGPT reports this confirmation as " + observed.Runtime + ". The previous decision remains unconfirmed; it will not be submitted again automatically.", false, nil
@@ -326,7 +331,7 @@ func (c *Client) answerConfirmation(parent context.Context, portal *bridgev2.Por
 	}
 	if reserved {
 		if previous.Action == command && previous.Applied {
-			return "ChatGPT already confirmed this decision: " + previous.Action + ".", false, nil
+			return "ChatGPT already confirmed this decision: " + decisionName(observed.Elicitation, previous.Action) + ".", false, nil
 		}
 		return "", !previous.Applied, errors.New("A decision was already submitted for this confirmation; check its status in ChatGPT")
 	}
@@ -359,7 +364,16 @@ func (c *Client) answerConfirmation(parent context.Context, portal *bridgev2.Por
 		return "", uncertain, err
 	}
 	c.requestRefresh(room.Profile.Room, string(target.ID), true)
-	return "ChatGPT confirmed this decision: " + command + ".", false, nil
+	return "ChatGPT confirmed this decision: " + decisionName(observed.Elicitation, command) + ".", false, nil
+}
+
+func decisionName(e *chatgpt.Elicitation, command string) string {
+	if i, ok := choiceIndex(command); ok {
+		if _, choices, ok := e.Choices(); ok && i < len(choices) {
+			return choices[i].Label
+		}
+	}
+	return command
 }
 
 func (c *Client) submitDecision(ctx context.Context, key string, operation ConfirmationAction, submit func() (bool, error)) (bool, error) {
@@ -397,8 +411,8 @@ func (c *Client) submitDecision(ctx context.Context, key string, operation Confi
 	return false, nil
 }
 
-func optionPickerDefinition(picker *chatgpt.OptionPicker) string {
-	encoded, _ := json.Marshal(picker.Options)
+func optionPickerDefinition(m chatgpt.Message, picker *chatgpt.OptionPicker) string {
+	encoded, _ := json.Marshal([]any{m.Content.Text, picker.Options})
 	hash := sha256.Sum256(encoded)
 	return hex.EncodeToString(hash[:])
 }
@@ -408,7 +422,7 @@ func optionPickerPoll(m chatgpt.Message) ([]pollAnswer, string) {
 	if !ok || picker.Selected != nil || m.Content.Elicitation != nil {
 		return nil, ""
 	}
-	return choicePollAnswers(picker.Options), optionPickerDefinition(picker)
+	return choicePollAnswers(picker.Options), optionPickerDefinition(m, picker)
 }
 
 func optionPickerText(m chatgpt.Message) string {
@@ -426,11 +440,56 @@ func optionPickerText(m chatgpt.Message) string {
 	return text
 }
 
-func optionPickerOutcome(picker *chatgpt.OptionPicker) string {
+func selectedOption(picker *chatgpt.OptionPicker) string {
 	if picker.Selected == nil || *picker.Selected < 0 {
 		return "This question was closed in ChatGPT"
 	}
 	return "Answered: " + picker.Options[*picker.Selected]
+}
+
+func (c *Client) optionPickerOutcome(ctx context.Context, api *chatgpt.Client, state *RoomState, m *chatgpt.Message, picker *chatgpt.OptionPicker) (string, error) {
+	if picker.Selected != nil {
+		return selectedOption(picker), nil
+	}
+	root := m.ReplyRootMessageID
+	if root == "" {
+		root = m.ID
+	}
+	before := ""
+	seen := make(map[string]bool)
+	for !seen[before] {
+		seen[before] = true
+		page, err := api.Replies(ctx, state.Profile.Room, root, before)
+		if err != nil {
+			return "", err
+		}
+		for _, reply := range page.Items {
+			if _, ok := reply.OptionPickerSelection(); ok && reply.Deleted == nil && reply.Sender == state.HumanMember && reply.ReplyTo.MessageID == m.ID {
+				return "Answered: " + reply.Content.Text, nil
+			}
+		}
+		if page.Prev == "" {
+			return "", nil
+		}
+		before = page.Prev
+	}
+	return "", errors.New("reply pagination repeated; refusing another answer")
+}
+
+func (c *Client) refreshOpenPicker(ctx context.Context, api *chatgpt.Client, state *RoomState, id, definition string) (bool, error) {
+	current, err := api.Message(ctx, state.Profile.Room, id)
+	if err != nil {
+		return false, err
+	}
+	picker, ok := current.OptionPicker()
+	if !ok || current.Deleted != nil || optionPickerDefinition(*current, picker) != definition {
+		return false, nil
+	}
+	outcome, err := c.optionPickerOutcome(ctx, api, state, current, picker)
+	if err == nil && outcome != "" {
+		c.endClosedPoll(state, &database.Message{ID: networkid.MessageID(id)}, outcome)
+	}
+	return err == nil, err
 }
 
 func (c *Client) answerOptionPicker(ctx context.Context, api *chatgpt.Client, room *RoomState, target *database.Message, definition string, eventID id.EventID, command string) (string, bool, error) {
@@ -443,7 +502,7 @@ func (c *Client) answerOptionPicker(ctx context.Context, api *chatgpt.Client, ro
 		return "", false, err
 	}
 	picker, ok := current.OptionPicker()
-	if !ok || current.Deleted != nil || current.Sender != room.DotMember || optionPickerDefinition(picker) != definition || choice >= len(picker.Options) {
+	if !ok || current.Deleted != nil || current.Sender != room.DotMember || optionPickerDefinition(*current, picker) != definition || choice >= len(picker.Options) {
 		return "", false, errors.New("This question changed; check it in ChatGPT")
 	}
 	key := room.Profile.Room + "\x00" + string(target.ID) + "\x00" + definition
@@ -456,20 +515,11 @@ func (c *Client) answerOptionPicker(ctx context.Context, api *chatgpt.Client, ro
 		}
 		return "", !previous.Applied, errors.New("An answer was already sent for this question; check it in ChatGPT")
 	}
-	answered := picker.Selected != nil
-	if !answered {
-		replies, err := api.Replies(ctx, room.Profile.Room, string(target.ID), "")
-		if err != nil {
-			return "", false, err
-		}
-		for _, reply := range replies.Items {
-			if _, ok := reply.OptionPickerSelection(); ok && reply.Deleted == nil && reply.Sender == room.HumanMember && reply.ReplyTo.MessageID == string(target.ID) {
-				answered = true
-			}
-		}
-	}
-	if answered {
-		c.requestRefresh(room.Profile.Room, string(target.ID), true)
+	outcome, err := c.optionPickerOutcome(ctx, api, room, current, picker)
+	if err != nil {
+		return "", false, err
+	} else if outcome != "" {
+		c.endClosedPoll(room, target, outcome)
 		return "", false, errors.New("This question is no longer waiting for an answer; check it in ChatGPT")
 	}
 	if err = ctx.Err(); err != nil {
@@ -570,24 +620,33 @@ func (c *Client) runConfirmationVote(ctx context.Context, msg *bridgev2.MatrixPo
 var _ bridgev2.PollHandlingNetworkAPI = (*Client)(nil)
 
 func (c *Client) refreshOpenPolls(ctx context.Context, api *chatgpt.Client, state *RoomState) error {
-	rows, err := c.connector.bridge.DB.Message.GetDB().Query(ctx, `SELECT id, COALESCE(metadata->>'confirmation', '') FROM message p WHERE bridge_id=$1 AND room_id=$2 AND room_receiver=$3 AND metadata->>'poll_options' IS NOT NULL AND NOT EXISTS (SELECT 1 FROM message e WHERE e.bridge_id=p.bridge_id AND e.room_receiver=p.room_receiver AND e.id=p.id AND e.part_id=$4)`, c.connector.bridge.ID, state.Profile.Room, c.login.ID, pollEndPart)
+	rows, err := c.connector.bridge.DB.Message.GetDB().Query(ctx, `SELECT id, COALESCE(metadata->>'confirmation', ''), COALESCE(metadata->>'option_picker', '') FROM message p WHERE bridge_id=$1 AND room_id=$2 AND room_receiver=$3 AND metadata->>'poll_options' IS NOT NULL AND NOT EXISTS (SELECT 1 FROM message e WHERE e.bridge_id=p.bridge_id AND e.room_receiver=p.room_receiver AND e.id=p.id AND e.part_id=$4)`, c.connector.bridge.ID, state.Profile.Room, c.login.ID, pollEndPart)
 	if err != nil {
 		return err
 	}
-	polls := make(map[string]string)
+	polls := make(map[string][2]string)
 	for rows.Next() {
-		var id, confirmation string
-		if err = rows.Scan(&id, &confirmation); err != nil {
+		var id, confirmation, picker string
+		if err = rows.Scan(&id, &confirmation, &picker); err != nil {
 			rows.Close()
 			return err
 		}
-		polls[id] = confirmation
+		polls[id] = [2]string{confirmation, picker}
 	}
 	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
 		return err
 	}
-	for id, confirmation := range polls {
-		if confirmation != "" {
+	for id, poll := range polls {
+		if confirmation, picker := poll[0], poll[1]; picker != "" {
+			handled, err := c.refreshOpenPicker(ctx, api, state, id, picker)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			} else if err != nil {
+				c.login.Log.Debug().Err(err).Str("message_id", id).Msg("Could not check an open question poll")
+			} else if handled {
+				continue
+			}
+		} else if confirmation != "" {
 			observed, err := api.ReadElicitation(ctx, state.Profile.Room, id)
 			if ctx.Err() != nil {
 				return ctx.Err()

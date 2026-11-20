@@ -669,6 +669,10 @@ func messageRevision(m chatgpt.Message, includeUpdateTime bool) string {
 		encoded = append(append(encoded, '\x00'), confirmation...)
 		encoded = append(encoded, byte(confirmationRenderingVersion))
 	}
+	if picker, ok := m.OptionPicker(); ok {
+		options, _ := json.Marshal(picker.Options)
+		encoded = append(append(encoded, '\x00'), options...)
+	}
 	updated := ""
 	if includeUpdateTime {
 		updated = m.Updated.Format(time.RFC3339Nano)
