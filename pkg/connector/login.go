@@ -77,6 +77,7 @@ type MessageMetadata struct {
 	Confirmation  string                     `json:"confirmation,omitempty"`
 	PollOptions   []string                   `json:"poll_options,omitempty"`
 	OptionPicker  string                     `json:"option_picker,omitempty"`
+	Answered      bool                       `json:"answered,omitempty"`
 	OutgoingMedia bool                       `json:"outgoing_media,omitempty"`
 	TextAnchor    bool                       `json:"text_anchor,omitempty"`
 	Revision      string                     `json:"revision"`

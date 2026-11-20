@@ -173,7 +173,7 @@ func pollEndEdit(msg *simplevent.Message[chatgpt.Message], m chatgpt.Message, ex
 		return nil
 	}
 	e := m.Content.Elicitation
-	text := "This confirmation changed; check it in ChatGPT"
+	text, answered := "This confirmation changed; check it in ChatGPT", false
 	if definition := poll.Metadata.(*MessageMetadata).OptionPicker; definition != "" {
 		picker, ok := m.OptionPicker()
 		if !ok || optionPickerDefinition(m, picker) != definition {
@@ -181,7 +181,7 @@ func pollEndEdit(msg *simplevent.Message[chatgpt.Message], m chatgpt.Message, ex
 		} else if picker.Selected == nil {
 			return nil
 		} else {
-			text = selectedOption(picker)
+			text, answered = selectedOption(picker), true
 		}
 	} else if len(confirmationPollAnswers(e)) > 0 && e.Definition() == poll.Metadata.(*MessageMetadata).Confirmation {
 		return nil
@@ -191,21 +191,21 @@ func pollEndEdit(msg *simplevent.Message[chatgpt.Message], m chatgpt.Message, ex
 	end := *msg
 	end.Type, end.PostHandleFunc, end.Timestamp = bridgev2.RemoteEventEdit, nil, ts
 	end.ConvertEditFunc = func(context.Context, *bridgev2.Portal, bridgev2.MatrixAPI, []*database.Message, chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
-		return pollEnd(poll, text, m.Updated), nil
+		return pollEnd(poll, text, m.Updated, answered), nil
 	}
 	return &end
 }
 
-func pollEnd(poll *database.Message, text string, updated time.Time) *bridgev2.ConvertedEdit {
-	return &bridgev2.ConvertedEdit{AddedParts: &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{ID: pollEndPart, Type: event.EventUnstablePollEnd, Content: &event.MessageEventContent{Body: text, RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: poll.MXID}}, Extra: map[string]any{"org.matrix.msc3381.poll.end": map[string]any{}, "org.matrix.msc1767.text": text}, DBMetadata: &MessageMetadata{Updated: updated}}}}}
+func pollEnd(poll *database.Message, text string, updated time.Time, answered bool) *bridgev2.ConvertedEdit {
+	return &bridgev2.ConvertedEdit{AddedParts: &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{ID: pollEndPart, Type: event.EventUnstablePollEnd, Content: &event.MessageEventContent{Body: text, RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: poll.MXID}}, Extra: map[string]any{"org.matrix.msc3381.poll.end": map[string]any{}, "org.matrix.msc1767.text": text}, DBMetadata: &MessageMetadata{Updated: updated, Answered: answered}}}}}
 }
 
-func (c *Client) endClosedPoll(room *RoomState, target *database.Message, text string) {
-	go c.login.QueueRemoteEvent(c.closedPollEvent(room, target, text, time.Now()))
+func (c *Client) endClosedPoll(room *RoomState, target *database.Message, text string, answered bool) {
+	go c.login.QueueRemoteEvent(c.closedPollEvent(room, target, text, answered))
 }
 
-func (c *Client) closedPollEvent(room *RoomState, target *database.Message, text string, ts time.Time) bridgev2.RemoteEvent {
-	evt := &simplevent.Message[chatgpt.Message]{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventEdit, PortalKey: c.key(room), Sender: bridgev2.EventSender{Sender: c.dotID(room)}, Timestamp: ts}, ID: target.ID, TargetMessage: target.ID}
+func (c *Client) closedPollEvent(room *RoomState, target *database.Message, text string, answered bool) bridgev2.RemoteEvent {
+	evt := &simplevent.Message[chatgpt.Message]{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventEdit, PortalKey: c.key(room), Sender: bridgev2.EventSender{Sender: c.dotID(room)}, Timestamp: time.Now()}, ID: target.ID, TargetMessage: target.ID}
 	evt.ConvertEditFunc = func(_ context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
 		var poll *database.Message
 		for _, part := range existing {
@@ -218,7 +218,7 @@ func (c *Client) closedPollEvent(room *RoomState, target *database.Message, text
 		if poll == nil {
 			return &bridgev2.ConvertedEdit{}, nil
 		}
-		return pollEnd(poll, text, time.Time{}), nil
+		return pollEnd(poll, text, time.Time{}, answered), nil
 	}
 	return evt
 }
@@ -350,7 +350,7 @@ func (c *Client) answerConfirmation(parent context.Context, portal *bridgev2.Por
 	}
 	if !observed.CanRespond || observed.Runtime != "pending" || observed.Elicitation.Status != "" && observed.Elicitation.Status != "pending" {
 		if observed.Runtime != "pending" {
-			c.endClosedPoll(room, target, "Confirmation status: "+observed.Runtime)
+			c.endClosedPoll(room, target, "Confirmation status: "+observed.Runtime, false)
 		}
 		c.requestRefresh(room.Profile.Room, string(target.ID), true)
 		return "", false, errors.New("This confirmation is no longer waiting for a response; check it in ChatGPT")
@@ -491,7 +491,7 @@ func (c *Client) refreshOpenPicker(ctx context.Context, api *chatgpt.Client, sta
 	}
 	outcome, err := c.optionPickerOutcome(ctx, api, state, current, picker)
 	if err == nil && outcome != "" {
-		c.endClosedPoll(state, &database.Message{ID: networkid.MessageID(id)}, outcome)
+		c.endClosedPoll(state, &database.Message{ID: networkid.MessageID(id)}, outcome, true)
 	}
 	return err == nil, err
 }
@@ -523,7 +523,7 @@ func (c *Client) answerOptionPicker(ctx context.Context, api *chatgpt.Client, ro
 	if err != nil {
 		return "", false, err
 	} else if outcome != "" {
-		c.endClosedPoll(room, target, outcome)
+		c.endClosedPoll(room, target, outcome, true)
 		return "", false, errors.New("This question is no longer waiting for an answer; check it in ChatGPT")
 	}
 	if err = ctx.Err(); err != nil {
@@ -657,7 +657,7 @@ func (c *Client) refreshOpenPolls(ctx context.Context, api *chatgpt.Client, stat
 			} else if err != nil {
 				c.login.Log.Debug().Err(err).Str("message_id", id).Msg("Could not check an open confirmation poll")
 			} else if observed.Runtime != "pending" {
-				c.endClosedPoll(state, &database.Message{ID: networkid.MessageID(id)}, "Confirmation status: "+observed.Runtime)
+				c.endClosedPoll(state, &database.Message{ID: networkid.MessageID(id)}, "Confirmation status: "+observed.Runtime, false)
 				continue
 			} else if observed.Elicitation.Definition() == confirmation && (observed.Elicitation.Status == "" || observed.Elicitation.Status == "pending") {
 				continue
@@ -683,7 +683,7 @@ func (c *Client) optionPickerAnswered(ctx context.Context, state *RoomState, rep
 	}
 	var poll *database.Message
 	for _, part := range parts {
-		if part.PartID == pollEndPart && part.Timestamp.Before(reply.Created) {
+		if md, ok := part.Metadata.(*MessageMetadata); part.PartID == pollEndPart && (!ok || !md.Answered) {
 			return false, nil
 		} else if md, ok := part.Metadata.(*MessageMetadata); ok && md.OptionPicker != "" && part.Room == c.key(state) {
 			poll = part
@@ -693,7 +693,7 @@ func (c *Client) optionPickerAnswered(ctx context.Context, state *RoomState, rep
 		return false, nil
 	}
 	if reply.Deleted == nil {
-		if result := c.login.QueueRemoteEvent(c.closedPollEvent(state, poll, "Answered: "+reply.Content.Text, reply.Created)); !result.Success {
+		if result := c.login.QueueRemoteEvent(c.closedPollEvent(state, poll, "Answered: "+reply.Content.Text, true)); !result.Success {
 			return false, errors.New("could not end the answered question poll; checkpoint retained")
 		}
 	}
