@@ -60,7 +60,7 @@ func confirmationText(m chatgpt.Message, prefix string) string {
 		for i, choice := range choices {
 			text += fmt.Sprintf("%d. %s\n", i+1, choice.Label)
 		}
-		return text + "\nAnswer it in the poll or in ChatGPT: https://chatgpt.com/dots/home"
+		return text + "\nAnswer it in ChatGPT: https://chatgpt.com/dots/home"
 	} else if !e.Binary() {
 		return text + "This request needs the ChatGPT interface: https://chatgpt.com/dots/home"
 	}
@@ -686,6 +686,8 @@ func (c *Client) optionPickerAnswered(ctx context.Context, state *RoomState, rep
 	if poll == nil {
 		return false, nil
 	}
-	c.endClosedPoll(state, poll, "Answered: "+reply.Content.Text)
+	if reply.Deleted == nil {
+		c.endClosedPoll(state, poll, "Answered: "+reply.Content.Text)
+	}
 	return true, c.clearPending(ctx, reply.RequestID)
 }
