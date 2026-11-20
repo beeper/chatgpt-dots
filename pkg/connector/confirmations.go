@@ -201,7 +201,11 @@ func pollEnd(poll *database.Message, text string, updated time.Time) *bridgev2.C
 }
 
 func (c *Client) endClosedPoll(room *RoomState, target *database.Message, text string) {
-	evt := &simplevent.Message[chatgpt.Message]{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventEdit, PortalKey: c.key(room), Sender: bridgev2.EventSender{Sender: c.dotID(room)}, Timestamp: time.Now()}, ID: target.ID, TargetMessage: target.ID}
+	go c.login.QueueRemoteEvent(c.closedPollEvent(room, target, text, time.Now()))
+}
+
+func (c *Client) closedPollEvent(room *RoomState, target *database.Message, text string, ts time.Time) bridgev2.RemoteEvent {
+	evt := &simplevent.Message[chatgpt.Message]{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventEdit, PortalKey: c.key(room), Sender: bridgev2.EventSender{Sender: c.dotID(room)}, Timestamp: ts}, ID: target.ID, TargetMessage: target.ID}
 	evt.ConvertEditFunc = func(_ context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, existing []*database.Message, _ chatgpt.Message) (*bridgev2.ConvertedEdit, error) {
 		var poll *database.Message
 		for _, part := range existing {
@@ -216,7 +220,7 @@ func (c *Client) endClosedPoll(room *RoomState, target *database.Message, text s
 		}
 		return pollEnd(poll, text, time.Time{}), nil
 	}
-	go c.login.QueueRemoteEvent(evt)
+	return evt
 }
 
 func (c *Connector) registerConfirmationCommands() error {
@@ -679,7 +683,9 @@ func (c *Client) optionPickerAnswered(ctx context.Context, state *RoomState, rep
 	}
 	var poll *database.Message
 	for _, part := range parts {
-		if md, ok := part.Metadata.(*MessageMetadata); ok && md.OptionPicker != "" && part.Room == c.key(state) {
+		if part.PartID == pollEndPart && part.Timestamp.Before(reply.Created) {
+			return false, nil
+		} else if md, ok := part.Metadata.(*MessageMetadata); ok && md.OptionPicker != "" && part.Room == c.key(state) {
 			poll = part
 		}
 	}
@@ -687,7 +693,9 @@ func (c *Client) optionPickerAnswered(ctx context.Context, state *RoomState, rep
 		return false, nil
 	}
 	if reply.Deleted == nil {
-		c.endClosedPoll(state, poll, "Answered: "+reply.Content.Text)
+		if result := c.login.QueueRemoteEvent(c.closedPollEvent(state, poll, "Answered: "+reply.Content.Text, reply.Created)); !result.Success {
+			return false, errors.New("could not end the answered question poll; checkpoint retained")
+		}
 	}
 	return true, c.clearPending(ctx, reply.RequestID)
 }
