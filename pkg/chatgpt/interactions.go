@@ -2,10 +2,12 @@ package chatgpt
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 )
 
 type ReplyTarget struct {
@@ -75,4 +77,59 @@ func (c *Client) SetReaction(ctx context.Context, room, messageID string, emoji 
 	return c.do(ctx, http.MethodPost, path, struct {
 		Reaction string `json:"reaction"`
 	}{Reaction: *emoji}, nil)
+}
+
+type OptionPicker struct {
+	Options  []string `json:"options"`
+	Selected *int     `json:"selected"`
+}
+
+func (m *Message) OptionPicker() (*OptionPicker, bool) {
+	var picker OptionPicker
+	if json.Unmarshal(m.Metadata["option_picker"], &picker) != nil || len(picker.Options) == 0 {
+		return nil, false
+	}
+	for _, option := range picker.Options {
+		if strings.TrimSpace(option) == "" {
+			return nil, false
+		}
+	}
+	if picker.Selected != nil && (*picker.Selected < -1 || *picker.Selected >= len(picker.Options)) {
+		return nil, false
+	}
+	return &picker, true
+}
+
+func (m *Message) OptionPickerSelection() (int, bool) {
+	var reply struct {
+		Selection *int `json:"selection"`
+	}
+	if json.Unmarshal(m.Metadata["option_picker"], &reply) != nil || reply.Selection == nil || *reply.Selection < 0 || m.ReplyTo == nil || m.ReplyTo.MessageID == "" {
+		return 0, false
+	}
+	return *reply.Selection, true
+}
+
+func (c *Client) AnswerOptionPicker(ctx context.Context, room, messageID, requestID, option string, selection int) (*Message, error) {
+	if err := c.interactionRoom(room, messageID); err != nil {
+		return nil, err
+	}
+	if requestID == "" || strings.TrimSpace(option) == "" || selection < 0 {
+		return nil, errors.New("invalid ChatGPT option selection")
+	}
+	body := map[string]any{
+		"content":           map[string]any{"text": option},
+		"request_id":        requestID,
+		"idempotency_token": requestID,
+		"reply_to":          ReplyTarget{MessageID: messageID},
+		"message_metadata":  map[string]any{"option_picker": map[string]any{"selection": selection}},
+	}
+	var m Message
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	err := c.request(ctx, http.MethodPost, "https://chatgpt.com/backend-api/messaging/rooms/"+url.PathEscape(room)+"/messages", body, &m)
+	if err == nil && (m.ID == "" || m.RequestID != requestID) {
+		err = errors.New("ChatGPT did not return the selection message")
+	}
+	return &m, err
 }

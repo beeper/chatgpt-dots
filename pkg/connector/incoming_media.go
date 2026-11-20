@@ -103,7 +103,7 @@ func (c *Client) warnUnrecognized(m chatgpt.Message, existing []*database.Messag
 	}
 	for key := range m.Metadata {
 		switch key {
-		case "turn_trigger", "elicitation_delivery", "elicitation_delivery_route", "approval_ref":
+		case "turn_trigger", "elicitation_delivery", "elicitation_delivery_route", "approval_ref", "option_picker":
 		default:
 			unrecognized = append(unrecognized, "message_metadata."+key)
 		}
@@ -320,8 +320,15 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 		}
 	}
 	var answers []pollAnswer
+	var picker string
 	if existing == nil && m.Deleted == nil && m.Sender == state.DotMember && len(confirmationQuestion(m)) <= maxPollQuestionBytes {
 		answers = confirmationPollAnswers(m.Content.Elicitation)
+		if len(answers) == 0 && strings.TrimSpace(m.Content.Text) != "" {
+			answers, picker = optionPickerPoll(m)
+		}
+	}
+	if len(answers) > maxPollAnswers {
+		answers, picker = nil, ""
 	}
 	attachments := mappedAttachments(m, existing)
 	caption := captionPart(m, attachments, existing)
@@ -342,6 +349,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			part.Type, part.DontBridge = event.EventUnstablePollStart, true
 			part.DBMetadata.(*MessageMetadata).PollOptions = md.PollOptions
 			part.DBMetadata.(*MessageMetadata).Confirmation = md.Confirmation
+			part.DBMetadata.(*MessageMetadata).OptionPicker = md.OptionPicker
 		} else if attachment == nil && len(answers) > 0 {
 			options := make([]string, len(answers))
 			for i, answer := range answers {
@@ -349,6 +357,7 @@ func (c *Client) convertIncoming(ctx context.Context, state *RoomState, portal *
 			}
 			part.Type, part.Extra = event.EventUnstablePollStart, confirmationPoll(confirmationQuestion(m), answers)
 			part.DBMetadata.(*MessageMetadata).PollOptions = options
+			part.DBMetadata.(*MessageMetadata).OptionPicker = picker
 		}
 		result.Parts = append(result.Parts, part)
 	}

@@ -1050,6 +1050,11 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 	} else {
 		return messageError{errors.New("message from an unverified Dot room member")}
 	}
+	if _, ok := m.OptionPickerSelection(); ok && m.Sender == state.HumanMember && m.Deleted == nil {
+		if answered, err := c.optionPickerAnswered(ctx, state, m); err != nil || answered {
+			return err
+		}
+	}
 	existing, err := c.connector.bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(m.ID))
 	if err != nil {
 		return err
