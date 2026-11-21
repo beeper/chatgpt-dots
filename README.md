@@ -15,7 +15,7 @@ protocol can interrupt the connection.
 - Emoji reactions in both directions, with one reaction per person per message.
 - Images, files and videos in both directions, with a bridge-local 20 MiB limit.
 - Task cards whose titles and status update in place.
-- Confirmation cards as polls, with accept, decline and status commands as a fallback.
+- Confirmation cards, single-choice requests and Dot option pickers as polls, with accept, decline and status commands as a fallback for confirmations.
 - Incoming typing indicators.
 - Read receipts in both directions, including chats read in ChatGPT.
 - Separate Dot and account avatars, account profile refresh and session renewal.
@@ -37,8 +37,10 @@ status. Tool approvals, such as letting the Dot use an app or download from a
 site, also offer `!dots accept-conversation <code>` to allow that tool for the
 rest of the ChatGPT conversation and `!dots accept-always <code>` to always
 allow it, when ChatGPT offers those choices. No quoted reply is needed. Ordinary messages such as “Yes” stay chat
-messages. Requests that need other form fields, sign-in, location
-or verification direct you to ChatGPT. A decision with an uncertain outcome
+messages. A request with a single choice field and a question the Dot asks with
+tappable options are polls too; voting sends the chosen option the way ChatGPT
+does. Requests that need other form fields, several selections, sign-in,
+location or verification direct you to ChatGPT. A decision with an uncertain outcome
 is never automatically submitted again, including after a restart.
 
 ## Build

@@ -41,31 +41,38 @@ func (e *Elicitation) Binary() bool {
 	return ok
 }
 
-func (e *Elicitation) AcceptContent() (map[string]any, bool) {
-	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" {
-		return nil, false
-	}
-	if _, ok := e.ToolApproval(); ok {
-		return map[string]any{}, true
-	}
-	if e.Params.Server == "browser" || e.Params.Server == "browser-use" {
-		return nil, false
+type formSchema struct {
+	Type       string                     `json:"type"`
+	Properties map[string]json.RawMessage `json:"properties"`
+	Required   []string                   `json:"required"`
+}
+
+func (e *Elicitation) form(allowedMeta ...string) (map[string]json.RawMessage, *formSchema, bool) {
+	if !e.Valid() || (e.Params.Mode != "" && e.Params.Mode != "form") || strings.TrimSpace(e.Params.Message) == "" || e.Params.Server == "browser" || e.Params.Server == "browser-use" {
+		return nil, nil, false
 	}
 	var meta map[string]json.RawMessage
 	if len(e.Params.Meta) != 0 && json.Unmarshal(e.Params.Meta, &meta) != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	for key := range meta {
-		if key != "reason" && key != "openai/confirmation" {
-			return nil, false
+		if !slices.Contains(allowedMeta, key) {
+			return nil, nil, false
 		}
 	}
-	var schema struct {
-		Type       string                     `json:"type"`
-		Properties map[string]json.RawMessage `json:"properties"`
-		Required   []string                   `json:"required"`
-	}
+	var schema formSchema
 	if json.Unmarshal(e.Params.Schema, &schema) != nil || schema.Type != "object" || schema.Properties == nil {
+		return nil, nil, false
+	}
+	return meta, &schema, true
+}
+
+func (e *Elicitation) AcceptContent() (map[string]any, bool) {
+	if _, ok := e.ToolApproval(); ok {
+		return map[string]any{}, true
+	}
+	meta, schema, ok := e.form("reason", "openai/confirmation")
+	if !ok {
 		return nil, false
 	}
 	if len(schema.Properties) == 0 && len(schema.Required) == 0 {
@@ -88,6 +95,97 @@ func (e *Elicitation) AcceptContent() (map[string]any, bool) {
 		}
 	}
 	return map[string]any{confirmation.Field: true}, true
+}
+
+type Choice struct {
+	Label string
+	Value any
+}
+
+func (e *Elicitation) Choices() (string, []Choice, bool) {
+	_, schema, ok := e.form("reason")
+	if !ok || len(schema.Properties) != 1 || e.Binary() {
+		return "", nil, false
+	}
+	var name string
+	var raw json.RawMessage
+	for name, raw = range schema.Properties {
+	}
+	for _, required := range schema.Required {
+		if required != name {
+			return "", nil, false
+		}
+	}
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(raw, &keys) != nil {
+		return "", nil, false
+	}
+	for key := range keys {
+		switch key {
+		case "type", "title", "description", "default", "enum", "enumNames", "oneOf", "anyOf":
+		default:
+			return "", nil, false
+		}
+	}
+	var field struct {
+		Type  string            `json:"type"`
+		Enum  []string          `json:"enum"`
+		Names []string          `json:"enumNames"`
+		OneOf []json.RawMessage `json:"oneOf"`
+		AnyOf []json.RawMessage `json:"anyOf"`
+	}
+	if json.Unmarshal(raw, &field) != nil {
+		return "", nil, false
+	}
+	var choices []Choice
+	switch {
+	case field.Type == "boolean" && keys["enum"] == nil && keys["oneOf"] == nil && keys["anyOf"] == nil:
+		choices = []Choice{{"Yes", true}, {"No", false}}
+	case field.Type != "string":
+		return "", nil, false
+	case keys["enum"] != nil && keys["oneOf"] == nil && keys["anyOf"] == nil:
+		if keys["enumNames"] != nil && len(field.Names) != len(field.Enum) {
+			return "", nil, false
+		}
+		for i, value := range field.Enum {
+			label := value
+			if len(field.Names) > 0 {
+				label = field.Names[i]
+			}
+			choices = append(choices, Choice{label, value})
+		}
+	case (keys["oneOf"] == nil) != (keys["anyOf"] == nil) && keys["enum"] == nil && keys["enumNames"] == nil:
+		for _, raw := range append(field.OneOf, field.AnyOf...) {
+			var option map[string]json.RawMessage
+			var value, title string
+			if json.Unmarshal(raw, &option) != nil || !strings.HasPrefix(string(option["const"]), `"`) || json.Unmarshal(option["const"], &value) != nil {
+				return "", nil, false
+			}
+			for key := range option {
+				if key != "const" && key != "title" {
+					return "", nil, false
+				}
+			}
+			if option["title"] != nil && json.Unmarshal(option["title"], &title) != nil {
+				return "", nil, false
+			}
+			if strings.TrimSpace(title) == "" {
+				title = value
+			}
+			choices = append(choices, Choice{title, value})
+		}
+	default:
+		return "", nil, false
+	}
+	if len(choices) == 0 {
+		return "", nil, false
+	}
+	for _, choice := range choices {
+		if strings.TrimSpace(choice.Label) == "" {
+			return "", nil, false
+		}
+	}
+	return name, choices, true
 }
 
 // ToolApproval reports whether this is a Codex tool-call approval and which remembered approvals it offers.
@@ -239,6 +337,17 @@ func (c *Client) ReadElicitation(ctx context.Context, room, message string) (*El
 }
 
 func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerprint, action, persist string, elicitation *Elicitation) (bool, error) {
+	return c.respondElicitation(ctx, room, message, fingerprint, action, persist, -1, elicitation)
+}
+
+func (c *Client) RespondElicitationChoice(ctx context.Context, room, message, fingerprint string, choice int, elicitation *Elicitation) (bool, error) {
+	if choice < 0 {
+		return false, errors.New("invalid ChatGPT choice")
+	}
+	return c.respondElicitation(ctx, room, message, fingerprint, "accept", "", choice, elicitation)
+}
+
+func (c *Client) respondElicitation(ctx context.Context, room, message, fingerprint, action, persist string, choice int, elicitation *Elicitation) (bool, error) {
 	path, err := c.elicitationPath(room, message)
 	if err != nil {
 		return false, err
@@ -255,7 +364,13 @@ func (c *Client) RespondElicitation(ctx context.Context, room, message, fingerpr
 		} `json:"result"`
 	}{Fingerprint: fingerprint}
 	body.Result.Action = action
-	if action == "accept" {
+	if choice >= 0 {
+		field, choices, ok := elicitation.Choices()
+		if !ok || choice >= len(choices) {
+			return false, errors.New("ChatGPT did not offer this choice")
+		}
+		body.Result.Content = map[string]any{field: choices[choice].Value}
+	} else if action == "accept" {
 		var ok bool
 		body.Result.Content, ok = elicitation.AcceptContent()
 		if !ok {

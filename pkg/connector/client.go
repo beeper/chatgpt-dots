@@ -669,6 +669,10 @@ func messageRevision(m chatgpt.Message, includeUpdateTime bool) string {
 		encoded = append(append(encoded, '\x00'), confirmation...)
 		encoded = append(encoded, byte(confirmationRenderingVersion))
 	}
+	if picker, ok := m.OptionPicker(); ok {
+		options, _ := json.Marshal(picker.Options)
+		encoded = append(append(encoded, '\x00'), options...)
+	}
 	updated := ""
 	if includeUpdateTime {
 		updated = m.Updated.Format(time.RFC3339Nano)
@@ -1049,6 +1053,11 @@ func (c *Client) deliver(ctx context.Context, state *RoomState, m chatgpt.Messag
 		sender = bridgev2.EventSender{Sender: c.GetUserID(), SenderLogin: c.login.ID, IsFromMe: true}
 	} else {
 		return messageError{errors.New("message from an unverified Dot room member")}
+	}
+	if _, ok := m.OptionPickerSelection(); ok && m.Sender == state.HumanMember {
+		if answered, err := c.optionPickerAnswered(ctx, state, m); err != nil || answered {
+			return err
+		}
 	}
 	existing, err := c.connector.bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(m.ID))
 	if err != nil {
