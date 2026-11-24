@@ -1,4 +1,0 @@
-# Proxy to use for ChatGPT connections.
-proxy: null
-# Alternative to proxy: an HTTP endpoint that returns the proxy URL to use for ChatGPT connections.
-get_proxy_url: null
