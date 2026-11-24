@@ -95,7 +95,7 @@ type Login struct {
 var _ bridgev2.LoginProcessWithParams = (*Login)(nil)
 
 func (c *Connector) GetLoginFlows() []bridgev2.LoginFlow {
-	return []bridgev2.LoginFlow{{ID: "cookies", Name: "ChatGPT Dots", Description: "Sign in with ChatGPT to message your existing Dot. Regular ChatGPT conversations are not imported."}}
+	return []bridgev2.LoginFlow{{ID: "cookies", Name: msgFlowCookiesName.Message(), Description: msgFlowCookiesDescription.Message()}}
 }
 func (c *Connector) CreateLogin(_ context.Context, u *bridgev2.User, flow string) (bridgev2.LoginProcess, error) {
 	if flow != "cookies" {
@@ -110,9 +110,7 @@ func (l *Login) StartWithParams(_ context.Context, params bridgev2.LoginStartPar
 	if !l.connector.hasProxy() {
 		l.transport = params.HTTP
 	}
-	instructions := "Connect ChatGPT Dots: sign in with ChatGPT to message your existing Dot. Regular ChatGPT conversations are not imported. ChatGPT credentials grant broader account access, not a provider-enforced Dots-only scope. This bridge uses them only for authentication, Dot discovery, verified Dot room messaging and status reads for tasks attached to those rooms. Credentials are stored by the bridge runtime. Logout removes this bridge's copy, not your ChatGPT browser session. Provider session renewal is automatic while the session remains valid; reconnect if ChatGPT revokes it."
-
-	return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeCookies, StepID: "chatgpt-dots.cookies", Instructions: instructions, CookiesParams: &bridgev2.LoginCookiesParams{
+	return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeCookies, StepID: "chatgpt-dots.cookies", Instructions: msgStepCookiesInstructions.Message(), CookiesParams: &bridgev2.LoginCookiesParams{
 		URL: "https://chatgpt.com/auth/login",
 		Fields: []bridgev2.LoginCookieField{
 			{ID: "access_token", Required: true, Sources: []bridgev2.LoginCookieFieldSource{{Type: bridgev2.LoginCookieTypeSpecial, Name: "chatgpt-dots.access_token"}}, Pattern: ".+"},
@@ -291,7 +289,7 @@ func (l *Login) submit(ctx context.Context, credentials chatgpt.Credentials) (*b
 	linked = true
 	login.Client.Connect(l.connector.bridge.BackgroundCtx)
 
-	return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "chatgpt-dots.complete", Instructions: "Connected the existing primary Dot. Only messages after linking are bridged.", CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: login.ID, UserLogin: login}}, nil
+	return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "chatgpt-dots.complete", Instructions: msgStepCompleteInstructions.Message(), CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: login.ID, UserLogin: login}}, nil
 }
 func roomState(api *chatgpt.Client, p chatgpt.Profile, r *chatgpt.Room) (*RoomState, error) {
 	state, err := roomMembers(api, p, r)
