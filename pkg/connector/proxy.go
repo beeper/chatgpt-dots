@@ -2,10 +2,7 @@ package connector
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -15,52 +12,12 @@ import (
 
 	"github.com/imroc/req/v3"
 	"github.com/rs/zerolog"
-	"maunium.net/go/mautrix"
 )
 
-type respGetProxy struct {
-	ProxyURL string `json:"proxy_url"`
-}
+func (c *Connector) SupportsProxy() {}
 
 func (c *Connector) hasProxy() bool {
-	return c.Config.Proxy != "" || c.Config.GetProxyURL != ""
-}
-
-func (c *Connector) getProxy(ctx context.Context, reason string) (string, error) {
-	if c.Config.GetProxyURL == "" {
-		return c.Config.Proxy, nil
-	}
-	parsed, err := url.Parse(c.Config.GetProxyURL)
-	if err != nil {
-		return "", errors.New("invalid proxy endpoint address")
-	}
-	q := parsed.Query()
-	q.Set("reason", reason)
-	parsed.RawQuery = q.Encode()
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-	if err != nil {
-		return "", errors.New("cannot prepare proxy request")
-	}
-	req.Header.Set("User-Agent", mautrix.DefaultUserAgent)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			err = urlErr.Err
-		}
-		return "", fmt.Errorf("proxy request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("proxy request returned HTTP %d", resp.StatusCode)
-	}
-	var respData respGetProxy
-	if err = json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&respData); err != nil {
-		return "", errors.New("unexpected proxy response schema")
-	}
-	return respData.ProxyURL, nil
+	return c.bridge.Config.Proxy.IsConfigured()
 }
 
 var browserHeaders = map[string]string{
@@ -182,7 +139,7 @@ func (t *proxyTransport) update(ctx context.Context, reason string) error {
 	if t.failed.Load() {
 		reason = "reconnect"
 	}
-	addr, err := t.connector.getProxy(ctx, reason)
+	addr, err := t.connector.bridge.GetProxy(ctx, reason)
 	if err != nil {
 		return err
 	}
@@ -195,7 +152,7 @@ func (t *proxyTransport) update(ctx context.Context, reason string) error {
 		t.log.Info().Str("reason", reason).Str("proxy_host", proxy.Host).Msg("Using proxy")
 	}
 	t.failed.Store(false)
-	if t.connector.Config.GetProxyURL != "" {
+	if t.connector.bridge.Config.Proxy.LookupURL != "" {
 		t.refreshAt.Store(time.Now().Add(proxyRefreshInterval).UnixNano())
 	}
 	next := newEgress(proxy)
