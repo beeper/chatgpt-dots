@@ -11,11 +11,11 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/beeper/chatgpt-dots/pkg/chatgpt"
+	"go.mau.fi/util/shape"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
@@ -101,12 +101,16 @@ func (c *Client) warnUnrecognized(m chatgpt.Message, existing []*database.Messag
 	for _, key := range m.Content.Unknown {
 		unrecognized = append(unrecognized, "content."+key)
 	}
-	for key := range m.Metadata {
+	unknownMetadata := map[string]json.RawMessage{}
+	for key, value := range m.Metadata {
 		switch key {
 		case "turn_trigger", "elicitation_delivery", "elicitation_delivery_route", "approval_ref", "option_picker":
 		default:
-			unrecognized = append(unrecognized, "message_metadata."+key)
+			unknownMetadata[key] = value
 		}
+	}
+	for _, key := range shape.Keys(unknownMetadata) {
+		unrecognized = append(unrecognized, "message_metadata."+key)
 	}
 	for _, raw := range m.Content.Attachments {
 		var fields map[string]json.RawMessage
@@ -117,12 +121,7 @@ func (c *Client) warnUnrecognized(m chatgpt.Message, existing []*database.Messag
 		case "file", "thread", "link", "widget":
 			continue
 		}
-		keys := make([]string, 0, len(fields))
-		for key := range fields {
-			keys = append(keys, key)
-		}
-		slices.Sort(keys)
-		unrecognized = append(unrecognized, "attachment."+kind+"("+strings.Join(keys, ",")+")")
+		unrecognized = append(unrecognized, "attachment."+kind+"("+strings.Join(shape.Keys(fields), ",")+")")
 	}
 	if m.Deleted == nil && m.Content.Text == "" && m.Content.Elicitation == nil && len(mappedAttachments(m, existing)) == 0 {
 		unrecognized = append(unrecognized, "no_content")

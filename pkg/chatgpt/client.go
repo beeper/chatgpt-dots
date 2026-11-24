@@ -10,11 +10,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"go.mau.fi/util/shape"
 )
 
 type Credentials struct {
@@ -107,13 +108,13 @@ func (c *MessageContent) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	c.Unknown = nil
+	unknown := map[string]json.RawMessage{}
 	for key, value := range fields {
 		if key != "text" && key != "attachments" && key != "elicitation" && string(value) != "null" {
-			c.Unknown = append(c.Unknown, key)
+			unknown[key] = value
 		}
 	}
-	slices.Sort(c.Unknown)
+	c.Unknown = shape.Keys(unknown)
 	return nil
 }
 
