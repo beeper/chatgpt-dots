@@ -7,7 +7,12 @@ import (
 	"testing"
 
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
 )
+
+func proxyConnector(cfg bridgeconfig.ProxyConfig) *Connector {
+	return &Connector{bridge: &bridgev2.Bridge{Config: &bridgeconfig.BridgeConfig{Proxy: cfg}}}
+}
 
 func TestProxyTransportUpdate(t *testing.T) {
 	var reason string
@@ -18,7 +23,7 @@ func TestProxyTransportUpdate(t *testing.T) {
 	}))
 	defer endpoint.Close()
 
-	proxy := &proxyTransport{connector: &Connector{Config: Config{GetProxyURL: endpoint.URL}}}
+	proxy := &proxyTransport{connector: proxyConnector(bridgeconfig.ProxyConfig{LookupURL: endpoint.URL})}
 	if err := proxy.update(context.Background(), "connect"); err != nil {
 		t.Fatal(err)
 	}
@@ -32,17 +37,17 @@ func TestProxyTransportUpdate(t *testing.T) {
 
 	previous := proxyURL
 	proxyURL = ""
-	if err := proxy.update(context.Background(), "connect"); err != nil {
-		t.Fatal(err)
+	if err := proxy.update(context.Background(), "connect"); err == nil {
+		t.Fatal("empty proxy_url should fail the update")
 	}
 	got, _ = proxy.current.Load().websocket.Proxy(httptest.NewRequest(http.MethodGet, "https://chatgpt.com/", nil))
-	if got != nil && got.String() == previous {
-		t.Fatal("empty proxy_url should stop using the previous proxy")
+	if got == nil || got.String() != previous {
+		t.Fatal("failed update should keep the previous proxy")
 	}
 }
 
 func TestProxyTransportMarksFailures(t *testing.T) {
-	proxy := &proxyTransport{connector: &Connector{Config: Config{Proxy: "http://127.0.0.1:1"}}}
+	proxy := &proxyTransport{connector: proxyConnector(bridgeconfig.ProxyConfig{URL: "http://127.0.0.1:1"})}
 	if err := proxy.update(context.Background(), "connect"); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +66,7 @@ func (clientHTTP) SetFingerprint(string) {}
 func TestLoginUsesProxyOverClientHTTP(t *testing.T) {
 	params := bridgev2.LoginStartParams{HTTP: clientHTTP{http.DefaultTransport}}
 
-	direct := &Login{connector: &Connector{}}
+	direct := &Login{connector: proxyConnector(bridgeconfig.ProxyConfig{})}
 	if _, err := direct.StartWithParams(context.Background(), params); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +74,7 @@ func TestLoginUsesProxyOverClientHTTP(t *testing.T) {
 		t.Fatal("login without a proxy should use the client HTTP transport")
 	}
 
-	proxied := &Login{connector: &Connector{Config: Config{GetProxyURL: "https://proxyserv.example"}}}
+	proxied := &Login{connector: proxyConnector(bridgeconfig.ProxyConfig{LookupURL: "https://proxyserv.example"})}
 	if _, err := proxied.StartWithParams(context.Background(), params); err != nil {
 		t.Fatal(err)
 	}
