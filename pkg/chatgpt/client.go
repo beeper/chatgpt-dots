@@ -464,10 +464,10 @@ func (c *Client) refresh(ctx context.Context) error {
 	identity, err := updated.Identity()
 	if err != nil {
 		return &RenewalError{Unreadable: true}
-	} else if identity.Account == c.Identity.Account && identity.User == c.Identity.User && time.Until(identity.Expires) > 0 &&
-		(session.Access == c.credentials.AccessToken || !identity.Expires.After(c.Identity.Expires)) {
-		return nil
-	} else if identity.Account != c.Identity.Account || identity.User != c.Identity.User || time.Until(identity.Expires) < time.Minute {
+	}
+	sameValidToken := identity.Account == c.Identity.Account && identity.User == c.Identity.User && time.Until(identity.Expires) > 0 &&
+		(session.Access == c.credentials.AccessToken || !identity.Expires.After(c.Identity.Expires))
+	if !sameValidToken && (identity.Account != c.Identity.Account || identity.User != c.Identity.User || time.Until(identity.Expires) < time.Minute) {
 		return &RenewalError{
 			AccountChanged: identity.Account != c.Identity.Account,
 			UserChanged:    identity.User != c.Identity.User,
