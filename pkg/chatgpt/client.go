@@ -466,7 +466,7 @@ func (c *Client) refresh(ctx context.Context) error {
 		return &RenewalError{Unreadable: true}
 	} else if identity.Account == c.Identity.Account && identity.User == c.Identity.User && time.Until(identity.Expires) > 0 &&
 		(session.Access == c.credentials.AccessToken || !identity.Expires.After(c.Identity.Expires)) {
-		return errors.New("ChatGPT session renewal returned the current access token; retrying")
+		return nil
 	} else if identity.Account != c.Identity.Account || identity.User != c.Identity.User || time.Until(identity.Expires) < time.Minute {
 		return &RenewalError{
 			AccountChanged: identity.Account != c.Identity.Account,
