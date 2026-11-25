@@ -154,10 +154,23 @@ func (c *Client) stateVia(err error, proxyHost string) bool {
 	state := status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: stateSyncFailed, Info: map[string]any{"go_error": err.Error()}}
 	var httpErr *chatgpt.HTTPError
 	var schemaErr *chatgpt.SchemaError
+	var renewalErr *chatgpt.RenewalError
 	if errors.Is(err, errDotUnavailable) {
 		state = badCredentialsState(stateDotUnavailable, err)
 	} else if errors.Is(err, errDotMissing) {
 		state.Error = stateDotMissing
+	} else if errors.As(err, &renewalErr) {
+		c.login.Log.Warn().Err(err).
+			Bool("account_changed", renewalErr.AccountChanged).
+			Bool("user_changed", renewalErr.UserChanged).
+			Bool("unreadable_token", renewalErr.Unreadable).
+			Dur("expires_in", renewalErr.ExpiresIn).
+			Msg("ChatGPT session renewal returned unusable credentials")
+		if renewalErr.AccountChanged || renewalErr.UserChanged {
+			state = badCredentialsState(stateIdentityChanged, err)
+		} else {
+			state = badCredentialsState(stateAuthExpired, err)
+		}
 	} else if errors.As(err, &httpErr) {
 		c.login.Log.Warn().Err(err).
 			Int("status", httpErr.Status).
