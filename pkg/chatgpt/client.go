@@ -183,6 +183,17 @@ var (
 	ErrNoPrimaryDot = errors.New("no available primary Dot; select an existing Dot in ChatGPT")
 )
 
+type RenewalError struct {
+	AccountChanged bool
+	UserChanged    bool
+	Unreadable     bool
+	ExpiresIn      time.Duration
+}
+
+func (e *RenewalError) Error() string {
+	return "ChatGPT renewal changed identity or returned expired access; reconnect the original account"
+}
+
 type HTTPError struct {
 	Status             int
 	Path               string
@@ -451,8 +462,14 @@ func (c *Client) refresh(ctx context.Context) error {
 	}
 	updated := Credentials{AccessToken: session.Access, SessionToken: session.Session}
 	identity, err := updated.Identity()
-	if err != nil || identity.Account != c.Identity.Account || identity.User != c.Identity.User || time.Until(identity.Expires) < time.Minute {
-		return errors.New("ChatGPT renewal changed identity or returned expired access; reconnect the original account")
+	if err != nil {
+		return &RenewalError{Unreadable: true}
+	} else if identity.Account != c.Identity.Account || identity.User != c.Identity.User || time.Until(identity.Expires) < time.Minute {
+		return &RenewalError{
+			AccountChanged: identity.Account != c.Identity.Account,
+			UserChanged:    identity.User != c.Identity.User,
+			ExpiresIn:      time.Until(identity.Expires),
+		}
 	}
 	if c.PersistCredentials != nil {
 		if err = c.PersistCredentials(updated); err != nil {
